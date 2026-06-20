@@ -1,5 +1,3 @@
-from getpass import getpass
-
 from eth_account.account import Account
 from eth_account.signers.local import LocalAccount
 from eth_utils import to_hex
@@ -7,8 +5,15 @@ from web3 import HTTPProvider, Web3
 from web3.exceptions import TransactionNotFound
 
 from rescue_scripts.calldata import build_calldata
+from rescue_scripts import ui
 from rescue_scripts.flashbots import FlashbotsWeb3, flashbot
-from rescue_scripts.prompts import prompt_choice, prompt_float, prompt_yes_no
+from rescue_scripts.prompts import (
+    pause,
+    prompt_float,
+    prompt_secret,
+    prompt_select,
+    prompt_yes_no,
+)
 from rescue_scripts.templates import GAS_GENERIC
 from rescue_scripts.types import RescueData
 from rescue_scripts.wizard import build_rescue_data
@@ -37,11 +42,11 @@ MAX_BLOCK_ATTEMPTS = 25  # ~5 minutes of blocks before checking in with the user
 def _load_key(label: str) -> LocalAccount:
     """Prompt for a private key (hidden input) and return the account."""
     while True:
-        raw = getpass(f"Enter the {label} private key: ").strip()
+        raw = prompt_secret(f"Enter the {label} private key")
         try:
             return Account.from_key(raw)
         except Exception:
-            print("  ⚠️  That doesn't look like a valid private key. Try again.")
+            ui.warning("That doesn't look like a valid private key. Try again.")
 
 
 def _setup_victim_account() -> LocalAccount:
@@ -54,40 +59,54 @@ def _setup_victim_account() -> LocalAccount:
 
 def _setup_gas_account() -> LocalAccount:
     """The wallet that pays for the rescue. Entered interactively or created fresh."""
-    print("\nGas wallet — this is the wallet that pays for the whole rescue:")
-    print("  1) I'll enter an existing private key")
-    print("  2) Create a new gas wallet for me")
-    if prompt_choice("Choose an option", 2) == 1:
+    ui.info("Gas wallet: this is the wallet that pays for the whole rescue.")
+    choice = prompt_select(
+        "How do you want to set up the gas wallet?",
+        [
+            ("I'll enter an existing private key", "existing"),
+            ("Create a new gas wallet for me", "create"),
+        ],
+    )
+    if choice == "existing":
         return _load_key("gas wallet")
 
     acct = Account.create()
-    print("\n  🔑 New gas wallet created:")
-    print(f"     Address:     {acct.address}")
-    print(f"     Private key: {to_hex(acct.key)}")
-    print("  ⚠️  SAVE this private key somewhere safe NOW. You'll fund the address")
-    print("      above in a later step, and you need the key to access any leftovers.")
-    input("  Press Enter once you've saved the private key... ")
+    ui.callout(
+        "New gas wallet created",
+        [
+            f"Address:     {acct.address}",
+            f"Private key: {to_hex(acct.key)}",
+            "",
+            "Save this private key somewhere safe now.",
+            "You will fund this address later and need the key for leftovers.",
+        ],
+        style="yellow",
+    )
+    pause("Press any key once you've saved the private key")
     return acct
 
 
 def load_accounts() -> tuple[LocalAccount, LocalAccount, LocalAccount]:
     """Collect the (victim, gas, auth) accounts. Auth is an ephemeral signer."""
-    print("\n--- Step 1: Set up accounts ---")
+    ui.section("Step 1: Set up accounts")
     victim = _setup_victim_account()
     gas = _setup_gas_account()
     auth = Account.create()  # ephemeral Flashbots signing identity; needs no funds
-    print(f"\n  Victim (compromised) wallet: {victim.address}")
-    print(f"  Gas (funding) wallet:        {gas.address}")
+    ui.render_accounts(victim.address, gas.address)
     return victim, gas, auth
 
 
 def choose_network() -> dict:
     """Pick the network to run against (mainnet, or Sepolia for testing)."""
-    print("Which network are you rescuing on?")
-    print("  1) Ethereum mainnet")
-    print("  2) Sepolia (testnet — for testing only)")
-    network = NETWORKS["mainnet"] if prompt_choice("Choose an option", 2) == 1 else NETWORKS["sepolia"]
-    print(f"  🌐 Using {network['label']}.")
+    key = prompt_select(
+        "Which network are you rescuing on?",
+        [
+            ("Ethereum mainnet", "mainnet"),
+            ("Sepolia (testnet - for testing only)", "sepolia"),
+        ],
+    )
+    network = NETWORKS[key]
+    ui.success(f"Using {network['label']}.")
     return network
 
 
@@ -130,7 +149,7 @@ def _estimate_gas(w3: Web3, victim: str, to: str, data: str, fallback: int) -> i
         )
         return int(estimate * 1.25)
     except Exception as e:
-        print(f"  ⚠️  Could not estimate gas for {to} ({e}); using fallback {fallback}")
+        ui.warning(f"Could not estimate gas for {to} ({e}); using fallback {fallback}")
         return fallback
 
 
@@ -141,42 +160,38 @@ def _required_funding(prepared: list[dict], max_fee_per_gas: int) -> int:
 
 
 def preview(w3: Web3, prepared: list[dict], max_fee_per_gas: int) -> None:
-    print("\n--- Step 3: Plan & cost preview ---")
-    print(f"  Network gas (maxFeePerGas): {w3.from_wei(max_fee_per_gas, 'gwei')} gwei")
-    total = 0
-    for i, a in enumerate(prepared, 1):
-        cost = a["gas"] * max_fee_per_gas
-        total += cost
-        print(
-            f"  {i}. {a['to']}  gas≈{a['gas']:,}  (≈{w3.from_wei(cost, 'ether')} ETH)"
-        )
-    print(f"  Estimated rescue cost: ≈{w3.from_wei(total, 'ether')} ETH")
+    ui.render_cost_preview(w3, prepared, max_fee_per_gas)
 
 
 # ---------------------------------------------------------------------------
 # Step 4: fund the gas wallet (with refresh)
 # ---------------------------------------------------------------------------
 def wait_for_funding(w3: Web3, gas_address: str, required: int) -> None:
-    print("\n--- Step 4: Fund the gas wallet ---")
-    print(
-        f"  Send at least {w3.from_wei(required, 'ether')} ETH to the gas wallet:\n"
-        f"    {gas_address}\n"
-        "  This wallet pays for the whole rescue. (Includes a safety buffer.)"
+    ui.section("Step 4: Fund the gas wallet")
+    ui.callout(
+        "Funding required",
+        [
+            f"Send at least {w3.from_wei(required, 'ether')} ETH to:",
+            gas_address,
+            "",
+            "This wallet pays for the whole rescue.",
+            "The amount includes a safety buffer.",
+        ],
     )
     while True:
         balance = w3.eth.get_balance(gas_address)
-        print(
-            f"  Current balance: {w3.from_wei(balance, 'ether')} ETH "
+        ui.info(
+            f"Current balance: {w3.from_wei(balance, 'ether')} ETH "
             f"/ needed {w3.from_wei(required, 'ether')} ETH"
         )
         if balance >= required:
-            print("  ✅ Gas wallet funded.")
+            ui.success("Gas wallet funded.")
             return
-        input("  Send funds, then press Enter to re-check (Ctrl+C to abort)... ")
+        pause("Send funds, then press any key to re-check (Ctrl+C to abort)")
 
 
 # ---------------------------------------------------------------------------
-# Step 5: build, sign, send (retry across blocks)
+# Step 5: simulate, build, sign, send (retry across blocks)
 # ---------------------------------------------------------------------------
 def _build_bundle(
     w3: Web3,
@@ -218,6 +233,57 @@ def _build_bundle(
     return [{"signed_transaction": s.rawTransaction} for s in signed]
 
 
+def _simulation_has_failures(result: dict) -> bool:
+    return any(
+        bool(tx_result.get("error") or tx_result.get("revert"))
+        for tx_result in result.get("results", [])
+    )
+
+
+def simulate_bundle(
+    w3: FlashbotsWeb3,
+    victim: LocalAccount,
+    gas: LocalAccount,
+    prepared: list[dict],
+    extra_priority_fee_gwei: float,
+) -> bool:
+    """Simulate the exact funding + rescue bundle before asking to send it."""
+    ui.section("Step 5: Simulate the rescue bundle")
+    victim_nonce = w3.eth.get_transaction_count(victim.address)
+    gas_nonce = w3.eth.get_transaction_count(gas.address)
+    priority_fee, max_fee_per_gas = _compute_fees(w3, extra_priority_fee_gwei)
+    target_block = w3.eth.block_number + 1
+    bundle = _build_bundle(
+        w3,
+        victim,
+        gas,
+        prepared,
+        priority_fee,
+        max_fee_per_gas,
+        victim_nonce,
+        gas_nonce,
+    )
+
+    ui.info(
+        f"Simulating bundle for block {target_block} "
+        f"@ {w3.from_wei(max_fee_per_gas, 'gwei')} gwei ..."
+    )
+    try:
+        with ui.console.status("Running Flashbots simulation..."):
+            result = w3.flashbots.simulate(bundle, block_tag=target_block)
+    except Exception as e:
+        ui.error(f"Bundle simulation failed: {e}")
+        return False
+
+    ui.render_simulation_result(result)
+    if _simulation_has_failures(result):
+        ui.error("Simulation completed, but one or more transactions failed.")
+        return False
+
+    ui.success("Simulation succeeded. The bundle executed without reported reverts.")
+    return True
+
+
 def send_with_retry(
     w3: FlashbotsWeb3,
     victim: LocalAccount,
@@ -236,7 +302,7 @@ def send_with_retry(
             # ensure the gas wallet can still cover the (possibly higher) fees
             needed = _required_funding(prepared, max_fee_per_gas)
             if w3.eth.get_balance(gas.address) < needed:
-                print("  ⚠️  Gas wallet balance dropped below requirement (fees rose).")
+                ui.warning("Gas wallet balance dropped below requirement (fees rose).")
                 wait_for_funding(w3, gas.address, needed)
 
             bundle = _build_bundle(
@@ -251,16 +317,17 @@ def send_with_retry(
             )
             target_block = w3.eth.block_number + 1
             result = w3.flashbots.send_bundle(bundle, target_block_number=target_block)
-            print(
-                f"  Attempt {attempt}/{MAX_BLOCK_ATTEMPTS} → block {target_block} "
+            ui.info(
+                f"Attempt {attempt}/{MAX_BLOCK_ATTEMPTS} -> block {target_block} "
                 f"@ {w3.from_wei(max_fee_per_gas, 'gwei')} gwei ..."
             )
-            result.wait()
+            with ui.console.status("Waiting for bundle result..."):
+                result.wait()
             try:
                 receipts = result.receipts()
-                print("\n🚀 Bundle included!")
-                print(f"🔗 Block: {receipts[0].blockNumber}")
-                print(f"🫆 Tx hashes: {[r.transactionHash.hex() for r in receipts]}")
+                ui.success("Bundle included.")
+                ui.info(f"Block: {receipts[0].blockNumber}")
+                ui.info(f"Tx hashes: {[r.transactionHash.hex() for r in receipts]}")
                 return True
             except TransactionNotFound:
                 continue
@@ -269,7 +336,7 @@ def send_with_retry(
             f"\nNot included after {MAX_BLOCK_ATTEMPTS} blocks. Keep trying?",
             default=True,
         ):
-            print("❌ Aborted by user. No rescue transactions were included.")
+            ui.error("Aborted by user. No rescue transactions were included.")
             return False
 
 
@@ -277,7 +344,7 @@ def send_with_retry(
 # Orchestrator
 # ---------------------------------------------------------------------------
 def run() -> None:
-    print("\n🛟  Whitehat Rescue — guided setup\n")
+    ui.title("Whitehat Rescue - guided setup")
 
     # Choose network (mainnet or Sepolia testnet)
     network = choose_network()
@@ -287,25 +354,34 @@ def run() -> None:
     w3 = connect(auth, network)
 
     # Step 2: build or load the plan
-    print("\n--- Step 2: Build the rescue plan ---")
+    ui.section("Step 2: Build the rescue plan")
     rescue_data = build_rescue_data(victim.address)
 
     # Step 3: estimate gas + preview cost
     extra_priority_fee = prompt_float("Extra priority fee to add (gwei)", default=0.0)
-    prepared = prepare_actions(w3, victim.address, rescue_data)
-    _, max_fee_per_gas = _compute_fees(w3, extra_priority_fee)
+    with ui.console.status("Preparing actions and estimating gas..."):
+        prepared = prepare_actions(w3, victim.address, rescue_data)
+        _, max_fee_per_gas = _compute_fees(w3, extra_priority_fee)
     preview(w3, prepared, max_fee_per_gas)
 
     if not prompt_yes_no("\nProceed to funding?", default=True):
-        print("Aborted. Nothing was sent.")
+        ui.warning("Aborted. Nothing was sent.")
         return
 
     # Step 4: fund the gas wallet (with refresh loop)
     wait_for_funding(w3, gas.address, _required_funding(prepared, max_fee_per_gas))
 
-    # Step 5: confirm and send (retry across blocks)
-    print("\n--- Step 5: Send the rescue bundle ---")
+    # Step 5: simulate, confirm, and send (retry across blocks)
+    simulation_ok = simulate_bundle(w3, victim, gas, prepared, extra_priority_fee)
+    if not simulation_ok and not prompt_yes_no(
+        "Simulation did not pass cleanly. Continue anyway?",
+        default=False,
+    ):
+        ui.warning("Aborted. Nothing was sent.")
+        return
+
+    ui.section("Step 6: Send the rescue bundle")
     if not prompt_yes_no("Send the rescue bundle now?", default=True):
-        print("Aborted. Nothing was sent.")
+        ui.warning("Aborted. Nothing was sent.")
         return
     send_with_retry(w3, victim, gas, prepared, extra_priority_fee)

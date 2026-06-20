@@ -8,8 +8,13 @@ dependencies = [
     "eth-abi>=5.2.0",
     "eth-utils>=4.1.1",
     "flashbots>=2.0.0",
+    "questionary>=2.1.0",
+    "rich>=14.0.0",
     "web3==6.20.2",
 ]
+
+[tool.uv]
+exclude-newer = "7 days"
 
 [project.scripts]
 eth-rescue = "rescue_scripts.rescue:run"
@@ -20,5 +25,6 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pytest>=8.0.0",
     "ruff>=0.12.12",
 ]

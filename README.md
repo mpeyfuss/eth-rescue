@@ -9,7 +9,7 @@ These scripts use private bundled transactions through Flashbots to ensure that 
 ## Getting Started
 1. Make sure you have [uv](https://docs.astral.sh/uv/) installed
 2. Run the rescue:
-   - From a clone: `uv sync` then `make rescue` (or `uv run rescue`)
+   - From a clone: `uv sync` then `uv run eth-rescue`
    - As an installed tool: see below
 
 The tool asks for everything it needs as you go — **no keystore files and no `.env`**. Private
@@ -20,23 +20,23 @@ Foundry required either — calldata is encoded in pure Python.
 The Flashbots signing key is always generated automatically — you never provide it.
 
 ## Install as a uv tool
-The project exposes a `rescue` command, so it can be installed and run anywhere with
+The project exposes a `eth-rescue` command, so it can be installed and run anywhere with
 [uv](https://docs.astral.sh/uv/):
 
 ```sh
 # Run once without installing (from a clone)
-uvx --from . rescue
+uvx --from . eth-rescue
 
 # Install the command globally, then run it from any folder
-uv tool install .            # or: uv tool install <git-or-pypi-source>
-rescue
+uv tool install eth-rescue
+eth-rescue
 ```
 
 The tool writes saved plans relative to the directory you run it from — so run `rescue` from
 your working folder.
 
 ## How the wizard works
-`make rescue` walks you through the whole rescue, step by step:
+`eth-rescue` walks you through the whole rescue, step by step:
 
 **Pick a network.** Choose Ethereum mainnet, or **Sepolia** to rehearse the whole flow on a
 testnet first (it just swaps the RPC and Flashbots relay URLs — everything else is identical).

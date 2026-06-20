@@ -17,6 +17,23 @@ from rescue_scripts.types import RescueData
 
 CONFIG_DIR = "configs"
 
+REQUIRED_ACTION_KEYS = ("address", "function_signature", "args")
+
+
+def _validate_actions(data: object) -> list[RescueData]:
+    """Validate raw JSON into a list of rescue actions, raising on bad shapes."""
+    if not isinstance(data, list) or not data:
+        raise ValueError("config must be a non-empty JSON list of actions")
+    for i, action in enumerate(data, 1):
+        if not isinstance(action, dict):
+            raise ValueError(f"action #{i} must be a JSON object")
+        missing = [key for key in REQUIRED_ACTION_KEYS if key not in action]
+        if missing:
+            raise ValueError(f"action #{i} is missing keys: {', '.join(missing)}")
+        if not isinstance(action["args"], list):
+            raise ValueError(f"action #{i} 'args' must be a JSON array")
+    return data
+
 
 def _load_config() -> list[RescueData]:
     """Power-user path: load an existing JSON config of rescue actions."""
@@ -24,11 +41,9 @@ def _load_config() -> list[RescueData]:
         path = prompt_path("Path to JSON config file")
         try:
             with open(path) as f:
-                data = json.load(f)
-            if not isinstance(data, list) or not data:
-                raise ValueError("config must be a non-empty JSON list of actions")
-            ui.success(f"Loaded {len(data)} action(s) from {path}")
-            return data
+                actions = _validate_actions(json.load(f))
+            ui.success(f"Loaded {len(actions)} action(s) from {path}")
+            return actions
         except (OSError, ValueError, json.JSONDecodeError) as e:
             ui.warning(f"Could not load config: {e}")
 

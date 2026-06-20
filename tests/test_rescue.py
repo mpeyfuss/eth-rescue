@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+from web3.exceptions import TransactionNotFound
+
 from rescue_scripts import rescue
 
 
@@ -208,3 +210,185 @@ def test_simulate_bundle_returns_false_for_rpc_exception(monkeypatch):
         0.0,
     )
     assert errors == ["Bundle simulation failed: relay unavailable"]
+
+
+# ---------------------------------------------------------------------------
+# send_with_retry / wait_for_funding (Layer 2: faked chain surface)
+# ---------------------------------------------------------------------------
+VICTIM = SimpleNamespace(address="victim-addr", key="victim-key")
+GAS = SimpleNamespace(address="gas-addr", key="gas-key")
+
+
+def _receipts():
+    return [
+        SimpleNamespace(
+            blockNumber=123,
+            transactionHash=SimpleNamespace(hex=lambda: "0xabc"),
+        )
+    ]
+
+
+class FakeSendResult:
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.waited = 0
+
+    def wait(self):
+        self.waited += 1
+
+    def receipts(self):
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+class FakeFlashbotsSender:
+    def __init__(self, outcomes):
+        self._outcomes = iter(outcomes)
+        self.sent = []
+
+    def send_bundle(self, bundle, target_block_number=None):
+        outcome = next(self._outcomes)
+        self.sent.append((bundle, target_block_number))
+        return FakeSendResult(outcome)
+
+
+class FakeEthSend:
+    def __init__(self, balance, victim_nonce=7, gas_nonce=3, block_number=100):
+        self._balance = balance
+        self.nonces = {VICTIM.address: victim_nonce, GAS.address: gas_nonce}
+        self.block_number = block_number
+        self.balance_calls = 0
+
+    def get_transaction_count(self, address):
+        return self.nonces[address]
+
+    def get_balance(self, address):
+        i = self.balance_calls
+        self.balance_calls += 1
+        if isinstance(self._balance, list):
+            return self._balance[min(i, len(self._balance) - 1)]
+        return self._balance
+
+
+class FakeWeb3Send:
+    def __init__(self, eth, flashbots=None):
+        self.eth = eth
+        self.flashbots = flashbots
+
+    def from_wei(self, value, unit):
+        if unit == "gwei":
+            return value // 1_000_000_000
+        if unit == "ether":
+            return value / 10**18
+        raise ValueError(unit)
+
+
+def _patch_send(monkeypatch, max_fee=20_000_000_000, required=1000):
+    monkeypatch.setattr(rescue, "_compute_fees", lambda w3, fee: (1, max_fee))
+    monkeypatch.setattr(
+        rescue, "_build_bundle", lambda *args: [{"signed_transaction": b"signed"}]
+    )
+    monkeypatch.setattr(rescue, "_required_funding", lambda prepared, mfpg: required)
+    for name in ("section", "info", "success", "warning", "error"):
+        monkeypatch.setattr(rescue.ui, name, lambda *a, **k: None)
+    monkeypatch.setattr(rescue.ui.console, "status", lambda message: DummyStatus())
+
+
+def _run_send(monkeypatch, flashbots, balance=1_000_000):
+    w3 = FakeWeb3Send(FakeEthSend(balance), flashbots)
+    return rescue.send_with_retry(w3, VICTIM, GAS, [{"to": "t", "gas": 21_000}], 0.0)
+
+
+def test_send_with_retry_returns_true_when_included_first_attempt(monkeypatch):
+    _patch_send(monkeypatch)
+    flashbots = FakeFlashbotsSender([_receipts()])
+
+    assert _run_send(monkeypatch, flashbots) is True
+    assert flashbots.sent == [([{"signed_transaction": b"signed"}], 101)]
+
+
+def test_send_with_retry_loops_until_included(monkeypatch):
+    fee_calls = []
+    _patch_send(monkeypatch)
+    monkeypatch.setattr(
+        rescue,
+        "_compute_fees",
+        lambda w3, fee: (fee_calls.append(1), (1, 20_000_000_000))[1],
+    )
+    flashbots = FakeFlashbotsSender(
+        [TransactionNotFound(), TransactionNotFound(), _receipts()]
+    )
+
+    assert _run_send(monkeypatch, flashbots) is True
+    assert len(flashbots.sent) == 3
+    assert len(fee_calls) == 3  # fees refreshed every attempt
+
+
+def test_send_with_retry_stops_after_max_attempts_when_user_declines(monkeypatch):
+    _patch_send(monkeypatch)
+    confirms = []
+    monkeypatch.setattr(
+        rescue, "prompt_yes_no", lambda *a, **k: confirms.append(1) or False
+    )
+    flashbots = FakeFlashbotsSender([TransactionNotFound()] * rescue.MAX_BLOCK_ATTEMPTS)
+
+    assert _run_send(monkeypatch, flashbots) is False
+    assert len(flashbots.sent) == rescue.MAX_BLOCK_ATTEMPTS
+    assert len(confirms) == 1
+
+
+def test_send_with_retry_keeps_trying_when_user_confirms(monkeypatch):
+    _patch_send(monkeypatch)
+    confirms = []
+    monkeypatch.setattr(
+        rescue, "prompt_yes_no", lambda *a, **k: confirms.append(1) or True
+    )
+    flashbots = FakeFlashbotsSender(
+        [TransactionNotFound()] * rescue.MAX_BLOCK_ATTEMPTS + [_receipts()]
+    )
+
+    assert _run_send(monkeypatch, flashbots) is True
+    assert len(flashbots.sent) == rescue.MAX_BLOCK_ATTEMPTS + 1
+    assert len(confirms) == 1
+
+
+def test_send_with_retry_refunds_when_balance_below_requirement(monkeypatch):
+    _patch_send(monkeypatch, required=1000)
+    refunds = []
+    monkeypatch.setattr(rescue, "wait_for_funding", lambda *a: refunds.append(a[1:]))
+    flashbots = FakeFlashbotsSender([_receipts()])
+    w3 = FakeWeb3Send(FakeEthSend(balance=[500]), flashbots)
+
+    assert (
+        rescue.send_with_retry(w3, VICTIM, GAS, [{"to": "t", "gas": 21_000}], 0.0)
+        is True
+    )
+    assert refunds == [(GAS.address, 1000)]
+
+
+def test_wait_for_funding_returns_immediately_when_funded(monkeypatch):
+    pauses = []
+    monkeypatch.setattr(rescue, "pause", lambda *a: pauses.append(1))
+    for name in ("section", "callout", "info", "success"):
+        monkeypatch.setattr(rescue.ui, name, lambda *a, **k: None)
+    w3 = FakeWeb3Send(FakeEthSend(balance=5000))
+
+    rescue.wait_for_funding(w3, GAS.address, required=1000)
+
+    assert pauses == []
+
+
+def test_wait_for_funding_waits_until_balance_reaches_requirement(monkeypatch):
+    pauses = []
+    successes = []
+    monkeypatch.setattr(rescue, "pause", lambda *a: pauses.append(1))
+    monkeypatch.setattr(rescue.ui, "success", successes.append)
+    for name in ("section", "callout", "info"):
+        monkeypatch.setattr(rescue.ui, name, lambda *a, **k: None)
+    w3 = FakeWeb3Send(FakeEthSend(balance=[0, 500, 1500]))
+
+    rescue.wait_for_funding(w3, GAS.address, required=1000)
+
+    assert len(pauses) == 2
+    assert successes == ["Gas wallet funded."]

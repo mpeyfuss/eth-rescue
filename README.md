@@ -32,8 +32,8 @@ uv tool install eth-rescue
 eth-rescue
 ```
 
-The tool writes saved plans relative to the directory you run it from — so run `rescue` from
-your working folder.
+The tool writes saved plans relative to the directory you run it from — so run `eth-rescue`
+from your working folder.
 
 ## How the wizard works
 `eth-rescue` walks you through the whole rescue, step by step:

@@ -22,7 +22,9 @@ def test_prompt_address_retries_and_checksums(monkeypatch):
     )
     monkeypatch.setattr(prompts.ui, "warning", warnings.append)
 
-    assert prompts.prompt_address("Wallet") == "0xde709f2102306220921060314715629080e2fb77"
+    assert (
+        prompts.prompt_address("Wallet") == "0xde709f2102306220921060314715629080e2fb77"
+    )
     assert warnings == ["That doesn't look like a valid Ethereum address. Try again."]
 
 

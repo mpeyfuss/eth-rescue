@@ -1,3 +1,5 @@
+from typing import Any
+
 from eth_abi import encode
 from eth_utils import function_signature_to_4byte_selector
 from hexbytes import HexBytes
@@ -41,7 +43,7 @@ def _parse_types(function_signature: str) -> list[str]:
     return _split_top_level_types(inner)
 
 
-def _coerce(abi_type: str, value):
+def _coerce(abi_type: str, value: Any):
     """
     Coerce a JSON / human-supplied value into the Python type that
     `eth_abi.encode` expects for the given ABI type.
@@ -70,7 +72,7 @@ def _coerce(abi_type: str, value):
     return value
 
 
-def build_calldata(function_signature: str, args: list) -> str:
+def build_calldata(function_signature: str, args: list[Any]) -> str:
     """
     Build ABI-encoded calldata for `function_signature` with `args`.
 

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from rescue_scripts import wizard
 
 SAFE = "0x1111111111111111111111111111111111111111"
@@ -24,9 +26,7 @@ def test_build_erc721_action(monkeypatch):
     assert action["address"] == CONTRACT
     assert action["function_signature"] == "transferFrom(address,address,uint256)"
     assert action["args"] == [VICTIM, SAFE, 123]
-    assert info == [
-        "While adding an action, type cancel, back, or exit to abandon it."
-    ]
+    assert info == ["While adding an action, type cancel, back, or exit to abandon it."]
 
 
 def test_build_erc1155_action(monkeypatch):
@@ -46,7 +46,10 @@ def test_build_erc1155_action(monkeypatch):
 
     action = wizard._build_action(SAFE, VICTIM)
 
-    assert action["function_signature"] == "safeTransferFrom(address,address,uint256,uint256,bytes)"
+    assert (
+        action["function_signature"]
+        == "safeTransferFrom(address,address,uint256,uint256,bytes)"
+    )
     assert action["args"] == [VICTIM, SAFE, 123, 4, "0x"]
 
 
@@ -102,6 +105,36 @@ def test_build_custom_action_retries_invalid_json_args(monkeypatch):
     assert action["function_signature"] == "setValue(uint256)"
     assert action["args"] == [42]
     assert len(warnings) == 1
+
+
+def test_validate_actions_accepts_well_formed_list():
+    actions = [
+        {
+            "address": CONTRACT,
+            "function_signature": "transfer(address,uint256)",
+            "args": [SAFE, 1000],
+        }
+    ]
+
+    assert wizard._validate_actions(actions) == actions
+
+
+@pytest.mark.parametrize(
+    "data, message",
+    [
+        ([], "non-empty"),
+        ({"address": CONTRACT}, "non-empty"),
+        (["not-an-object"], "must be a JSON object"),
+        ([{"address": CONTRACT, "args": []}], "missing keys"),
+        (
+            [{"address": CONTRACT, "function_signature": "f()", "args": "nope"}],
+            "must be a JSON array",
+        ),
+    ],
+)
+def test_validate_actions_rejects_bad_shapes(data, message):
+    with pytest.raises(ValueError, match=message):
+        wizard._validate_actions(data)
 
 
 def test_load_config_retries_invalid_then_loads_valid(tmp_path, monkeypatch):

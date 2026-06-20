@@ -39,7 +39,7 @@ def prompt_secret(label: str, allow_cancel: bool = False) -> str:
     """Prompt for hidden free-form text."""
     value = _ask(questionary.password(label)).strip()
     _raise_if_cancelled(value, allow_cancel)
-    return value.strip()
+    return value
 
 
 def prompt_path(label: str, allow_cancel: bool = False) -> str:
@@ -59,8 +59,7 @@ def prompt_select[T](label: str, choices: list[tuple[str, T]]) -> T:
         questionary.select(
             label,
             choices=[
-                questionary.Choice(title=title, value=value)
-                for title, value in choices
+                questionary.Choice(title=title, value=value) for title, value in choices
             ],
         )
     )
@@ -111,8 +110,3 @@ def prompt_yes_no(label: str, default: bool | None = None) -> bool:
     if default is None:
         return prompt_select(label, [("Yes", True), ("No", False)])
     return bool(_ask(questionary.confirm(label, default=default)))
-
-
-def prompt_choice(label: str, n: int) -> int:
-    """Prompt for a menu choice in [1, n], re-asking until valid."""
-    return prompt_select(label, [(str(i), i) for i in range(1, n + 1)])

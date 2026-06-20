@@ -1,11 +1,13 @@
+from typing import cast
+
 from eth_account.account import Account
 from eth_account.signers.local import LocalAccount
 from eth_utils import to_hex
 from web3 import HTTPProvider, Web3
 from web3.exceptions import TransactionNotFound
 
-from rescue_scripts.calldata import build_calldata
 from rescue_scripts import ui
+from rescue_scripts.calldata import build_calldata
 from rescue_scripts.flashbots import FlashbotsWeb3, flashbot
 from rescue_scripts.prompts import (
     pause,
@@ -15,10 +17,16 @@ from rescue_scripts.prompts import (
     prompt_yes_no,
 )
 from rescue_scripts.templates import GAS_GENERIC
-from rescue_scripts.types import RescueData
+from rescue_scripts.types import (
+    BundleEntry,
+    Network,
+    PreparedAction,
+    RescueData,
+    SimulationResult,
+)
 from rescue_scripts.wizard import build_rescue_data
 
-NETWORKS = {
+NETWORKS: dict[str, Network] = {
     "mainnet": {
         "label": "Ethereum mainnet",
         "rpc": "https://ethereum-rpc.publicnode.com",
@@ -96,7 +104,7 @@ def load_accounts() -> tuple[LocalAccount, LocalAccount, LocalAccount]:
     return victim, gas, auth
 
 
-def choose_network() -> dict:
+def choose_network() -> Network:
     """Pick the network to run against (mainnet, or Sepolia for testing)."""
     key = prompt_select(
         "Which network are you rescuing on?",
@@ -113,10 +121,9 @@ def choose_network() -> dict:
 # ---------------------------------------------------------------------------
 # Step 3: connect, estimate gas, preview cost
 # ---------------------------------------------------------------------------
-def connect(auth: LocalAccount, network: dict) -> FlashbotsWeb3:
-    w3: FlashbotsWeb3 = Web3(HTTPProvider(network["rpc"]))
-    flashbot(w3, auth, network["relay"])
-    return w3
+def connect(auth: LocalAccount, network: Network) -> FlashbotsWeb3:
+    w3 = Web3(HTTPProvider(network["rpc"]))
+    return flashbot(w3, auth, network["relay"])
 
 
 def _compute_fees(w3: Web3, extra_priority_fee_gwei: float) -> tuple[int, int]:
@@ -127,11 +134,13 @@ def _compute_fees(w3: Web3, extra_priority_fee_gwei: float) -> tuple[int, int]:
     return priority_fee, max_fee_per_gas
 
 
-def prepare_actions(w3: Web3, victim: str, rescue_data: list[RescueData]) -> list[dict]:
+def prepare_actions(
+    w3: Web3, victim: str, rescue_data: list[RescueData]
+) -> list[PreparedAction]:
     """Encode calldata and estimate gas once per action."""
     if not isinstance(rescue_data, list) or not rescue_data:
         raise ValueError("No rescue actions provided")
-    prepared = []
+    prepared: list[PreparedAction] = []
     for data in rescue_data:
         tx_data = build_calldata(data["function_signature"], data["args"])
         gas = _estimate_gas(
@@ -153,13 +162,13 @@ def _estimate_gas(w3: Web3, victim: str, to: str, data: str, fallback: int) -> i
         return fallback
 
 
-def _required_funding(prepared: list[dict], max_fee_per_gas: int) -> int:
+def _required_funding(prepared: list[PreparedAction], max_fee_per_gas: int) -> int:
     """Total ETH the gas wallet must hold: rescue gas + funding tx gas + buffer."""
     rescue_cost = sum(a["gas"] * max_fee_per_gas for a in prepared)
     return int((rescue_cost + FUNDING_TX_GAS * max_fee_per_gas) * FUNDING_BUFFER)
 
 
-def preview(w3: Web3, prepared: list[dict], max_fee_per_gas: int) -> None:
+def preview(w3: Web3, prepared: list[PreparedAction], max_fee_per_gas: int) -> None:
     ui.render_cost_preview(w3, prepared, max_fee_per_gas)
 
 
@@ -197,12 +206,12 @@ def _build_bundle(
     w3: Web3,
     victim: LocalAccount,
     gas: LocalAccount,
-    prepared: list[dict],
+    prepared: list[PreparedAction],
     priority_fee: int,
     max_fee_per_gas: int,
     victim_nonce: int,
     gas_nonce: int,
-) -> list[dict]:
+) -> list[BundleEntry]:
     chain_id = w3.eth.chain_id
     rescue_cost = sum(a["gas"] * max_fee_per_gas for a in prepared)
     funding_tx = {
@@ -233,7 +242,7 @@ def _build_bundle(
     return [{"signed_transaction": s.rawTransaction} for s in signed]
 
 
-def _simulation_has_failures(result: dict) -> bool:
+def _simulation_has_failures(result: SimulationResult) -> bool:
     return any(
         bool(tx_result.get("error") or tx_result.get("revert"))
         for tx_result in result.get("results", [])
@@ -244,7 +253,7 @@ def simulate_bundle(
     w3: FlashbotsWeb3,
     victim: LocalAccount,
     gas: LocalAccount,
-    prepared: list[dict],
+    prepared: list[PreparedAction],
     extra_priority_fee_gwei: float,
 ) -> bool:
     """Simulate the exact funding + rescue bundle before asking to send it."""
@@ -270,7 +279,10 @@ def simulate_bundle(
     )
     try:
         with ui.console.status("Running Flashbots simulation..."):
-            result = w3.flashbots.simulate(bundle, block_tag=target_block)
+            result = cast(
+                SimulationResult,
+                w3.flashbots.simulate(bundle, block_tag=target_block),
+            )
     except Exception as e:
         ui.error(f"Bundle simulation failed: {e}")
         return False
@@ -288,7 +300,7 @@ def send_with_retry(
     w3: FlashbotsWeb3,
     victim: LocalAccount,
     gas: LocalAccount,
-    prepared: list[dict],
+    prepared: list[PreparedAction],
     extra_priority_fee_gwei: float,
 ) -> bool:
     """Resend the bundle each block (refreshing fees) until included or aborted."""

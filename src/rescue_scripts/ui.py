@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from rescue_scripts.types import RescueData
+from rescue_scripts.types import PreparedAction, RescueData, SimulationResult
 
 console = Console()
 
@@ -70,7 +70,9 @@ def render_rescue_plan(actions: list[RescueData]) -> None:
     console.print()
 
 
-def render_cost_preview(w3: Any, prepared: list[dict], max_fee_per_gas: int) -> None:
+def render_cost_preview(
+    w3: Any, prepared: list[PreparedAction], max_fee_per_gas: int
+) -> None:
     section("Step 3: Plan & cost preview")
     console.print(
         f"Network gas (maxFeePerGas): "
@@ -99,7 +101,7 @@ def render_cost_preview(w3: Any, prepared: list[dict], max_fee_per_gas: int) -> 
     console.print(table)
 
 
-def render_simulation_result(result: dict[str, Any]) -> None:
+def render_simulation_result(result: SimulationResult) -> None:
     table = Table(title="Bundle simulation", box=box.ASCII)
     table.add_column("#", justify="right", style="bold")
     table.add_column("Tx hash", overflow="fold")

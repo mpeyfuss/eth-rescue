@@ -8,4 +8,4 @@ lint:
 
 # Run script
 rescue:
-	uv run main.py
+	uv run rescue

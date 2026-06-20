@@ -1,0 +1,70 @@
+from rescue_scripts.types import RescueData
+
+# Fallback gas estimates per action type (used when on-chain estimation fails).
+# Values mirror the historical examples in `examples/`.
+GAS_ERC20 = 70000
+GAS_ERC721 = 140000
+GAS_ERC1155 = 85000
+GAS_OWNERSHIP = 40000
+GAS_GENERIC = 150000
+
+
+def erc20_transfer(contract: str, to: str, amount: int) -> RescueData:
+    """Transfer ERC20 tokens (amount in base units, e.g. wei) to a safe wallet."""
+    return {
+        "address": contract,
+        "function_signature": "transfer(address,uint256)",
+        "args": [to, amount],
+        "gas_estimate": GAS_ERC20,
+        "description": f"ERC20 transfer of {amount} (base units) to {to}",
+    }
+
+
+def erc721_transfer(
+    contract: str, from_victim: str, to: str, token_id: int
+) -> RescueData:
+    """Transfer an ERC721 NFT from the victim wallet to a safe wallet."""
+    return {
+        "address": contract,
+        "function_signature": "transferFrom(address,address,uint256)",
+        "args": [from_victim, to, token_id],
+        "gas_estimate": GAS_ERC721,
+        "description": f"ERC721 token #{token_id} -> {to}",
+    }
+
+
+def erc1155_transfer(
+    contract: str, from_victim: str, to: str, token_id: int, amount: int
+) -> RescueData:
+    """Transfer ERC1155 tokens from the victim wallet to a safe wallet."""
+    return {
+        "address": contract,
+        "function_signature": "safeTransferFrom(address,address,uint256,uint256,bytes)",
+        "args": [from_victim, to, token_id, amount, "0x"],
+        "gas_estimate": GAS_ERC1155,
+        "description": f"ERC1155 token #{token_id} x{amount} -> {to}",
+    }
+
+
+def transfer_ownership(contract: str, to: str) -> RescueData:
+    """Transfer ownership of a contract (Ownable) to a safe wallet."""
+    return {
+        "address": contract,
+        "function_signature": "transferOwnership(address)",
+        "args": [to],
+        "gas_estimate": GAS_OWNERSHIP,
+        "description": f"transferOwnership of {contract} -> {to}",
+    }
+
+
+def custom(
+    contract: str, function_signature: str, args: list, gas_estimate: int = GAS_GENERIC
+) -> RescueData:
+    """Generic action: any function signature + args (power-user escape hatch)."""
+    return {
+        "address": contract,
+        "function_signature": function_signature,
+        "args": args,
+        "gas_estimate": gas_estimate,
+        "description": f"custom {function_signature} on {contract}",
+    }

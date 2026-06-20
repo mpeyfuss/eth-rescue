@@ -12,3 +12,6 @@ wheels/
 
 # Secrets
 .env
+
+# Saved rescue plans (may contain wallet addresses)
+configs/

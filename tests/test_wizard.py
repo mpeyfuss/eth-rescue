@@ -1,4 +1,5 @@
 import json
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -7,6 +8,7 @@ from rescue_scripts import wizard
 SAFE = "0x1111111111111111111111111111111111111111"
 VICTIM = "0x2222222222222222222222222222222222222222"
 CONTRACT = "0x3333333333333333333333333333333333333333"
+AUCTION_HOUSE = "0x6f66b95a0c512f3497fb46660e0bc3b94b989f8d"
 
 
 def test_build_erc721_action(monkeypatch):
@@ -21,12 +23,81 @@ def test_build_erc721_action(monkeypatch):
     monkeypatch.setattr(wizard, "prompt_int", lambda label, allow_cancel=False: 123)
     monkeypatch.setattr(wizard.ui, "info", info.append)
 
-    action = wizard._build_action(SAFE, VICTIM)
+    action = wizard._build_actions(None, SAFE, VICTIM)[0]
 
     assert action["address"] == CONTRACT
     assert action["function_signature"] == "transferFrom(address,address,uint256)"
     assert action["args"] == [VICTIM, SAFE, 123]
     assert info == ["While adding an action, type cancel, back, or exit to abandon it."]
+
+
+def test_build_transient_erc721_actions_looks_up_owner(monkeypatch):
+    values = iter([CONTRACT])
+    w3 = MagicMock()
+    w3.eth.contract.return_value.functions.ownerOf.return_value.call.return_value = (
+        AUCTION_HOUSE
+    )
+
+    monkeypatch.setattr(
+        wizard, "prompt_select", lambda label, choices: "transient_erc721"
+    )
+    monkeypatch.setattr(
+        wizard,
+        "prompt_address",
+        lambda label, allow_cancel=False: next(values),
+    )
+    monkeypatch.setattr(wizard, "prompt_int", lambda label, allow_cancel=False: 123)
+    monkeypatch.setattr(wizard.ui, "info", lambda message: None)
+
+    actions = wizard._build_actions(w3, SAFE, VICTIM)
+
+    w3.eth.contract.assert_called_once_with(
+        address=CONTRACT, abi=wizard.ERC721_OWNER_OF_ABI
+    )
+    assert [action["function_signature"] for action in actions] == [
+        "delist(address,uint256)",
+        "transferFrom(address,address,uint256)",
+    ]
+    assert actions[0]["address"] == wizard.to_checksum_address(AUCTION_HOUSE)
+    assert actions[1]["args"] == [VICTIM, SAFE, 123]
+
+
+def test_build_transient_erc721_actions_rejects_unknown_owner(monkeypatch):
+    warnings = []
+    w3 = MagicMock()
+    w3.eth.contract.return_value.functions.ownerOf.return_value.call.return_value = SAFE
+
+    monkeypatch.setattr(
+        wizard, "prompt_select", lambda label, choices: "transient_erc721"
+    )
+    monkeypatch.setattr(
+        wizard, "prompt_address", lambda label, allow_cancel=False: CONTRACT
+    )
+    monkeypatch.setattr(wizard, "prompt_int", lambda label, allow_cancel=False: 123)
+    monkeypatch.setattr(wizard.ui, "info", lambda message: None)
+    monkeypatch.setattr(wizard.ui, "warning", warnings.append)
+
+    assert wizard._build_actions(w3, SAFE, VICTIM) is None
+    assert "not a recognized Transient Auction House" in warnings[0]
+
+
+def test_build_transient_erc721_actions_handles_owner_lookup_failure(monkeypatch):
+    warnings = []
+    w3 = MagicMock()
+    w3.eth.contract.side_effect = RuntimeError("RPC unavailable")
+
+    monkeypatch.setattr(
+        wizard, "prompt_select", lambda label, choices: "transient_erc721"
+    )
+    monkeypatch.setattr(
+        wizard, "prompt_address", lambda label, allow_cancel=False: CONTRACT
+    )
+    monkeypatch.setattr(wizard, "prompt_int", lambda label, allow_cancel=False: 123)
+    monkeypatch.setattr(wizard.ui, "info", lambda message: None)
+    monkeypatch.setattr(wizard.ui, "warning", warnings.append)
+
+    assert wizard._build_actions(w3, SAFE, VICTIM) is None
+    assert warnings == ["Could not look up the current token owner: RPC unavailable"]
 
 
 def test_build_erc1155_action(monkeypatch):
@@ -44,7 +115,7 @@ def test_build_erc1155_action(monkeypatch):
         lambda label, allow_cancel=False: next(ints),
     )
 
-    action = wizard._build_action(SAFE, VICTIM)
+    action = wizard._build_actions(None, SAFE, VICTIM)[0]
 
     assert (
         action["function_signature"]
@@ -63,7 +134,7 @@ def test_build_erc20_action(monkeypatch):
     monkeypatch.setattr(wizard, "prompt_int", lambda label, allow_cancel=False: 1000)
     monkeypatch.setattr(wizard.ui, "info", lambda message: None)
 
-    action = wizard._build_action(SAFE, VICTIM)
+    action = wizard._build_actions(None, SAFE, VICTIM)[0]
 
     assert action["function_signature"] == "transfer(address,uint256)"
     assert action["args"] == [SAFE, 1000]
@@ -77,7 +148,7 @@ def test_build_ownership_action(monkeypatch):
         lambda label, allow_cancel=False: CONTRACT,
     )
 
-    action = wizard._build_action(SAFE, VICTIM)
+    action = wizard._build_actions(None, SAFE, VICTIM)[0]
 
     assert action["function_signature"] == "transferOwnership(address)"
     assert action["args"] == [SAFE]
@@ -100,7 +171,7 @@ def test_build_custom_action_retries_invalid_json_args(monkeypatch):
     )
     monkeypatch.setattr(wizard.ui, "warning", warnings.append)
 
-    action = wizard._build_action(SAFE, VICTIM)
+    action = wizard._build_actions(None, SAFE, VICTIM)[0]
 
     assert action["function_signature"] == "setValue(uint256)"
     assert action["args"] == [42]
@@ -165,7 +236,7 @@ def test_build_action_can_cancel_from_action_type(monkeypatch):
     monkeypatch.setattr(wizard, "prompt_select", lambda label, choices: "cancel")
     monkeypatch.setattr(wizard.ui, "warning", warnings.append)
 
-    assert wizard._build_action(SAFE, VICTIM) is None
+    assert wizard._build_actions(None, SAFE, VICTIM) is None
     assert warnings == ["Cancelled current action."]
 
 
@@ -179,7 +250,7 @@ def test_build_action_can_cancel_mid_action(monkeypatch):
     monkeypatch.setattr(wizard, "prompt_address", cancel_address)
     monkeypatch.setattr(wizard.ui, "warning", warnings.append)
 
-    assert wizard._build_action(SAFE, VICTIM) is None
+    assert wizard._build_actions(None, SAFE, VICTIM) is None
     assert warnings == ["Cancelled current action."]
 
 
@@ -187,11 +258,13 @@ def test_build_rescue_data_returns_to_menu_after_cancel(monkeypatch):
     selections = iter(["wizard", "finish"])
     actions = [
         None,
-        {
-            "address": CONTRACT,
-            "function_signature": "transfer(address,uint256)",
-            "args": [SAFE, 1000],
-        },
+        [
+            {
+                "address": CONTRACT,
+                "function_signature": "transfer(address,uint256)",
+                "args": [SAFE, 1000],
+            }
+        ],
     ]
 
     monkeypatch.setattr(
@@ -200,11 +273,13 @@ def test_build_rescue_data_returns_to_menu_after_cancel(monkeypatch):
         lambda label, choices: next(selections),
     )
     monkeypatch.setattr(wizard, "prompt_address", lambda label: SAFE)
-    monkeypatch.setattr(wizard, "_build_action", lambda safe, victim: actions.pop(0))
+    monkeypatch.setattr(
+        wizard, "_build_actions", lambda w3, safe, victim: actions.pop(0)
+    )
     monkeypatch.setattr(wizard, "print_plan", lambda actions: None)
     monkeypatch.setattr(wizard, "save_config", lambda actions: None)
 
-    assert wizard.build_rescue_data(VICTIM) == [
+    assert wizard.build_rescue_data(None, VICTIM) == [
         {
             "address": CONTRACT,
             "function_signature": "transfer(address,uint256)",

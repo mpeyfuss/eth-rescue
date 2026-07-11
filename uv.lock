@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.13"
 
 [options]
-exclude-newer = "2026-07-04T01:36:58.97119Z"
+exclude-newer = "2026-07-04T02:28:26.337697Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -765,7 +765,6 @@ dependencies = [
     { name = "questionary" },
     { name = "requests" },
     { name = "rich" },
-    { name = "rlp" },
     { name = "web3" },
 ]
 
@@ -782,7 +781,6 @@ requires-dist = [
     { name = "questionary", specifier = ">=2.1.0" },
     { name = "requests", specifier = ">=2.32" },
     { name = "rich", specifier = ">=14.0.0" },
-    { name = "rlp", specifier = ">=4.1.0" },
     { name = "web3", specifier = ">=7.16,<8" },
 ]
 

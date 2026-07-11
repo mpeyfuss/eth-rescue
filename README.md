@@ -53,6 +53,7 @@ leftover ETH. Then either load a previously saved plan, or use the guided wizard
 or more actions:
 
 - **ERC721 NFT** — move an NFT (contract + token id)
+- **Transient Auction House ERC721** — delist an escrowed NFT, then move it to safety
 - **ERC1155 NFT** — move semi-fungible tokens (contract + token id + amount)
 - **ERC20 token** — move tokens (contract + amount in base units / wei)
 - **Contract ownership** — `transferOwnership` of a contract you control

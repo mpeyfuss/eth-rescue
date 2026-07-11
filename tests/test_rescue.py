@@ -1,9 +1,10 @@
 from types import SimpleNamespace
 
-import rlp
+import pytest
 from eth_account.account import Account
-from eth_keys import keys
-from eth_utils import keccak
+from eth_account.typed_transactions import TypedTransaction
+from hexbytes import HexBytes
+from web3 import Web3
 from web3.exceptions import TransactionNotFound
 
 from rescue_scripts import rescue
@@ -163,6 +164,47 @@ def test_build_bundle_sets_priority_fee_on_every_transaction(monkeypatch):
     assert account.signed_txs[3][1] == "victim-key"
 
 
+def test_build_bundle_skips_undelegation_for_plain_eoa():
+    account = FakeAccount()
+    w3 = SimpleNamespace(eth=SimpleNamespace(chain_id=1, account=account))
+
+    bundle = rescue._build_bundle(
+        w3,
+        victim=FakeSigner("victim", "victim-key"),
+        gas=FakeSigner("gas", "gas-key"),
+        prepared=[{"to": "target", "data": "0x1234", "gas": 50_000}],
+        safe_address="safe",
+        priority_fee=1,
+        max_fee_per_gas=20,
+        effective_fee_cap=10,
+        victim_nonce=9,
+        gas_nonce=2,
+        victim_balance=0,
+        needs_undelegation=False,
+    )
+
+    assert bundle == [
+        {"signed_transaction": "signed-1"},
+        {"signed_transaction": "signed-2"},
+        {"signed_transaction": "signed-3"},
+    ]
+    txs = [tx for tx, _private_key in account.signed_txs]
+    assert [tx["nonce"] for tx in txs] == [2, 9, 10]
+
+
+def test_has_7702_delegation_recognizes_only_delegation_designator():
+    victim = "0x0000000000000000000000000000000000000001"
+
+    def has_delegation(code):
+        w3 = SimpleNamespace(eth=SimpleNamespace(get_code=lambda address: code))
+        return rescue._has_7702_delegation(w3, victim)
+
+    assert has_delegation(b"") is False
+    assert has_delegation(b"\xef\x01\x00" + b"\x11" * 20) is True
+    with pytest.raises(ValueError, match="unexpected non-EIP-7702 code"):
+        has_delegation(b"\x60\x00")
+
+
 def test_sign_7702_undelegation_builds_type_4_clear_authorization():
     victim = Account.create()
     gas = Account.create()
@@ -179,28 +221,22 @@ def test_sign_7702_undelegation_builds_type_4_clear_authorization():
     )
 
     assert raw_tx[0] == rescue.SET_CODE_TX_TYPE
-    decoded = rlp.decode(raw_tx[1:])
-    authorization = decoded[9][0]
-    assert authorization[0] == b"\x01"
-    assert authorization[1] == b"\x00" * 20
-    assert authorization[2] == b"\x09"
-    assert int.from_bytes(decoded[4]) == rescue.UNDELEGATE_TX_GAS
-
-    auth_hash = keccak(
-        bytes([rescue.SET_CODE_MAGIC])
-        + rlp.encode([1, b"\x00" * 20, 9])
+    transaction = TypedTransaction.from_bytes(HexBytes(raw_tx)).as_dict()
+    authorization = transaction["authorizationList"][0]
+    assert transaction["nonce"] == 3
+    assert transaction["to"] == HexBytes(gas.address)
+    assert transaction["gas"] == rescue.UNDELEGATE_TX_GAS
+    assert authorization["chainId"] == 1
+    assert authorization["address"] == HexBytes(rescue.ZERO_ADDRESS)
+    assert authorization["nonce"] == 9
+    expected_authorization = Account.sign_authorization(
+        {"chainId": 1, "address": rescue.ZERO_ADDRESS, "nonce": 9}, victim.key
     )
-    auth_signature = keys.Signature(
-        vrs=tuple(int.from_bytes(value) for value in authorization[3:6])
-    )
-    assert auth_signature.recover_public_key_from_msg_hash(auth_hash).to_checksum_address() == victim.address
-
-    unsigned_payload = decoded[:10]
-    tx_hash = keccak(bytes([rescue.SET_CODE_TX_TYPE]) + rlp.encode(unsigned_payload))
-    tx_signature = keys.Signature(
-        vrs=tuple(int.from_bytes(value) for value in decoded[10:13])
-    )
-    assert tx_signature.recover_public_key_from_msg_hash(tx_hash).to_checksum_address() == gas.address
+    assert Web3.to_checksum_address(expected_authorization.authority) == victim.address
+    assert authorization["yParity"] == expected_authorization.y_parity
+    assert authorization["r"] == expected_authorization.r
+    assert authorization["s"] == expected_authorization.s
+    assert Account.recover_transaction(raw_tx) == gas.address
 
 
 def test_simulate_bundle_returns_true_for_clean_result(monkeypatch):

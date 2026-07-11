@@ -5,6 +5,7 @@ GAS_ERC20 = 70000
 GAS_ERC721 = 140000
 GAS_ERC1155 = 85000
 GAS_OWNERSHIP = 40000
+GAS_TRANSIENT_DELIST = 120000
 GAS_GENERIC = 150000
 
 
@@ -30,6 +31,26 @@ def erc721_transfer(
         "gas_estimate": GAS_ERC721,
         "description": f"ERC721 token #{token_id} -> {to}",
     }
+
+
+def transient_auction_house_erc721_rescue(
+    auction_house: str,
+    contract: str,
+    from_victim: str,
+    to: str,
+    token_id: int,
+) -> list[RescueData]:
+    """Delist an escrowed ERC721 from Transient and transfer it to safety."""
+    return [
+        {
+            "address": auction_house,
+            "function_signature": "delist(address,uint256)",
+            "args": [contract, token_id],
+            "gas_estimate": GAS_TRANSIENT_DELIST,
+            "description": f"Delist ERC721 token #{token_id} from Transient Auction House",
+        },
+        erc721_transfer(contract, from_victim, to, token_id),
+    ]
 
 
 def erc1155_transfer(

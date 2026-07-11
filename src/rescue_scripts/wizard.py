@@ -2,8 +2,12 @@ import json
 import os
 from datetime import datetime
 
+from eth_utils import is_address, to_checksum_address
+from web3 import Web3
+
 from rescue_scripts import templates
 from rescue_scripts import ui
+from rescue_scripts.abi import ERC721_OWNER_OF_ABI
 from rescue_scripts.prompts import (
     PromptCancelled,
     prompt_address,
@@ -13,13 +17,15 @@ from rescue_scripts.prompts import (
     prompt_text,
     prompt_yes_no,
 )
-from rescue_scripts.types import RescueData
 from rescue_scripts.templates import GAS_GENERIC
-from eth_utils import is_address, to_checksum_address
+from rescue_scripts.types import RescueData
 
 CONFIG_DIR = "configs"
 
 REQUIRED_ACTION_KEYS = ("address", "function_signature", "args")
+TRANSIENT_AUCTION_HOUSES = {
+    to_checksum_address("0x6f66b95a0c512f3497fb46660e0bc3b94b989f8d"),
+}
 
 
 def _validate_actions(data: object) -> list[RescueData]:
@@ -37,10 +43,18 @@ def _validate_actions(data: object) -> list[RescueData]:
         if not is_address(action["address"]):
             raise ValueError(f"action #{i} has an invalid contract address")
         signature = action["function_signature"]
-        if not isinstance(signature, str) or "(" not in signature or not signature.endswith(")"):
+        if (
+            not isinstance(signature, str)
+            or "(" not in signature
+            or not signature.endswith(")")
+        ):
             raise ValueError(f"action #{i} has an invalid function signature")
         gas_estimate = action.get("gas_estimate", GAS_GENERIC)
-        if isinstance(gas_estimate, bool) or not isinstance(gas_estimate, int) or gas_estimate <= 0:
+        if (
+            isinstance(gas_estimate, bool)
+            or not isinstance(gas_estimate, int)
+            or gas_estimate <= 0
+        ):
             raise ValueError(f"action #{i} 'gas_estimate' must be a positive integer")
         action["address"] = to_checksum_address(action["address"])
         action["gas_estimate"] = gas_estimate
@@ -60,13 +74,16 @@ def _load_config() -> list[RescueData]:
             ui.warning(f"Could not load config: {e}")
 
 
-def _build_action(safe_wallet: str, victim_hint: str) -> RescueData | None:
-    """Ask the user which kind of rescue and gather the inputs for one action."""
+def _build_actions(
+    w3: Web3, safe_wallet: str, victim_hint: str
+) -> list[RescueData] | None:
+    """Ask the user which kind of rescue and gather its ordered actions."""
     ui.info("While adding an action, type cancel, back, or exit to abandon it.")
     choice = prompt_select(
         "What do you want to rescue?",
         [
             ("ERC721 NFT", "erc721"),
+            ("Transient Auction House ERC721", "transient_erc721"),
             ("ERC1155 NFT", "erc1155"),
             ("ERC20 token", "erc20"),
             ("Contract ownership", "ownership"),
@@ -83,17 +100,42 @@ def _build_action(safe_wallet: str, victim_hint: str) -> RescueData | None:
         if choice == "erc721":
             contract = prompt_address("NFT contract address", allow_cancel=True)
             token_id = prompt_int("Token ID", allow_cancel=True)
-            return templates.erc721_transfer(
-                contract, victim_hint, safe_wallet, token_id
+            return [
+                templates.erc721_transfer(contract, victim_hint, safe_wallet, token_id)
+            ]
+
+        if choice == "transient_erc721":
+            contract = prompt_address("NFT contract address", allow_cancel=True)
+            token_id = prompt_int("Token ID", allow_cancel=True)
+            try:
+                owner = (
+                    w3.eth.contract(address=contract, abi=ERC721_OWNER_OF_ABI)
+                    .functions.ownerOf(token_id)
+                    .call()
+                )
+                auction_house = to_checksum_address(owner)
+            except Exception as e:
+                ui.warning(f"Could not look up the current token owner: {e}")
+                return None
+            if auction_house not in TRANSIENT_AUCTION_HOUSES:
+                ui.warning(
+                    f"Current token owner {auction_house} is not a recognized "
+                    "Transient Auction House."
+                )
+                return None
+            return templates.transient_auction_house_erc721_rescue(
+                auction_house, contract, victim_hint, safe_wallet, token_id
             )
 
         if choice == "erc1155":
             contract = prompt_address("NFT contract address", allow_cancel=True)
             token_id = prompt_int("Token ID", allow_cancel=True)
             amount = prompt_int("Amount to transfer", allow_cancel=True)
-            return templates.erc1155_transfer(
-                contract, victim_hint, safe_wallet, token_id, amount
-            )
+            return [
+                templates.erc1155_transfer(
+                    contract, victim_hint, safe_wallet, token_id, amount
+                )
+            ]
 
         if choice == "erc20":
             contract = prompt_address("Token contract address", allow_cancel=True)
@@ -102,14 +144,14 @@ def _build_action(safe_wallet: str, victim_hint: str) -> RescueData | None:
                 "is 1000000000000000000."
             )
             amount = prompt_int("Amount to transfer (base units)", allow_cancel=True)
-            return templates.erc20_transfer(contract, safe_wallet, amount)
+            return [templates.erc20_transfer(contract, safe_wallet, amount)]
 
         if choice == "ownership":
             contract = prompt_address(
                 "Contract address to transfer ownership of",
                 allow_cancel=True,
             )
-            return templates.transfer_ownership(contract, safe_wallet)
+            return [templates.transfer_ownership(contract, safe_wallet)]
 
         contract = prompt_address("Target contract address", allow_cancel=True)
         sig = prompt_text(
@@ -130,7 +172,7 @@ def _build_action(safe_wallet: str, victim_hint: str) -> RescueData | None:
                 break
             except (ValueError, json.JSONDecodeError) as e:
                 ui.warning(f"Could not parse args: {e}")
-        return templates.custom(contract, sig, args)
+        return [templates.custom(contract, sig, args)]
     except PromptCancelled:
         ui.warning("Cancelled current action.")
         return None
@@ -142,6 +184,7 @@ def print_plan(actions: list[RescueData]) -> None:
 
 
 def revise_rescue_data(
+    w3: Web3,
     actions: list[RescueData],
     safe_wallet: str,
     victim_address: str,
@@ -152,7 +195,9 @@ def revise_rescue_data(
     while True:
         choices = []
         if failing_action_index is not None and failing_action_index < len(revised):
-            choices.append((f"Remove failing action #{failing_action_index + 1}", "remove"))
+            choices.append(
+                (f"Remove failing action #{failing_action_index + 1}", "remove")
+            )
         choices.extend(
             [
                 ("Add another action", "add"),
@@ -167,12 +212,12 @@ def revise_rescue_data(
             failing_action_index = None
             print_plan(revised)
         elif choice == "add":
-            action = _build_action(safe_wallet, victim_address)
-            if action is not None:
-                revised.append(action)
+            new_actions = _build_actions(w3, safe_wallet, victim_address)
+            if new_actions is not None:
+                revised.extend(new_actions)
                 print_plan(revised)
         elif choice == "rebuild":
-            return build_rescue_data(victim_address, safe_wallet)
+            return build_rescue_data(w3, victim_address, safe_wallet)
         elif choice == "finish":
             if revised:
                 return revised
@@ -201,6 +246,7 @@ def save_config(actions: list[RescueData]) -> None:
 
 
 def build_rescue_data(
+    w3: Web3,
     victim_address: str = "",
     safe_wallet: str | None = None,
 ) -> list[RescueData]:
@@ -242,9 +288,9 @@ def build_rescue_data(
             if next_step == "finish":
                 break
 
-        action = _build_action(safe_wallet, victim_hint)
-        if action is not None:
-            actions.append(action)
+        new_actions = _build_actions(w3, safe_wallet, victim_hint)
+        if new_actions is not None:
+            actions.extend(new_actions)
 
     print_plan(actions)
     save_config(actions)

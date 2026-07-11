@@ -1,8 +1,8 @@
 import os
-import selectors
 import shutil
 import socket
 import subprocess
+import time
 from collections.abc import Iterator
 
 import pytest
@@ -45,6 +45,7 @@ def anvil_w3() -> Iterator[Web3]:
             str(port),
             "--chain-id",
             "31337",
+            "--quiet",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -52,25 +53,28 @@ def anvil_w3() -> Iterator[Web3]:
     )
     url = f"http://127.0.0.1:{port}"
     w3 = Web3(HTTPProvider(url, request_kwargs={"timeout": 1}))
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    output: list[str] = []
-    events = selector.select(timeout=10)
-    while events:
-        line = process.stdout.readline()
-        output.append(line)
-        if "Listening on" in line:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            output, _ = process.communicate()
+            pytest.fail(
+                f"Anvil exited with code {process.returncode} while starting with "
+                f"{ANVIL_HARDFORK}:\n{output}"
+            )
+        if w3.is_connected():
             break
-        events = selector.select(timeout=10)
+        time.sleep(0.05)
     else:
         process.terminate()
+        try:
+            output, _ = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            output, _ = process.communicate(timeout=5)
         pytest.fail(
             f"Anvil did not start within 10 seconds using {ANVIL_HARDFORK}:\n"
-            + "".join(output)
+            + output
         )
-    if not w3.is_connected():
-        process.terminate()
-        pytest.fail(f"Anvil announced startup but RPC is unavailable at {url}")
 
     try:
         yield w3

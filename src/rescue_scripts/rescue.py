@@ -587,6 +587,12 @@ def send_with_retry(
                 with ui.console.status("Waiting for bundle result..."):
                     result.wait()
                 receipts = result.receipts()
+                if len(receipts) != len(bundle.transactions):
+                    raise RuntimeError(
+                        "Relay submission did not return every transaction receipt"
+                    )
+                if any(receipt["status"] != 1 for receipt in receipts):
+                    raise RuntimeError("One or more rescue transactions reverted")
                 ui.success("Bundle included.")
                 ui.info(f"Block: {receipts[0].blockNumber}")
                 ui.info(f"Tx hashes: {[r.transactionHash.hex() for r in receipts]}")

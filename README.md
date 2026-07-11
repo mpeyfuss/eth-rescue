@@ -103,13 +103,37 @@ Before using mainnet, rehearse with disposable Sepolia accounts:
 
 ## Local integration tests
 
-The fast unit suite mocks only the relay and interactive boundaries. The integration suite
+Run the fast unit suite with:
+
+```sh
+make test-unit
+```
+
+The unit suite covers calldata construction, templates and wizard validation, fee and funding
+calculations, gas-estimation fallbacks, bundle construction, relay request/response handling,
+simulation failures, receipt validation, refreshed retries, and interactive boundaries.
+
+The integration suite
 starts an isolated Anvil node using the Osaka execution fork, which is the current Ethereum
-mainnet EVM fork after Fusaka:
+mainnet EVM fork after Fusaka. It compiles minimal fixture contracts and exercises the real
+rescue preparation, simulation, signing, funding, asset transfer, undelegation, and ETH sweep
+paths for ERC-20, ERC-721, ERC-1155, ownership, and auction delisting:
 
 ```sh
 make test-integration
 ```
 
-To use an Anvil process you started yourself, set `ANVIL_RPC_URL`. Override
-`ANVIL_HARDFORK` only when intentionally testing another execution fork.
+Each integration test starts a fresh local Anvil process. Override `ANVIL_HARDFORK` only when
+intentionally testing another execution fork.
+
+The local relay double snapshots Anvil for simulation and broadcasts signed transactions one at
+a time for execution. This verifies transaction contents, ordering, state changes, and rollback,
+but it does not model Flashbots privacy, builder selection, same-block execution, or atomic bundle
+inclusion.
+
+Those limitations matter: sequential Anvil execution mines transactions in separate blocks, so it
+cannot reproduce a builder's exact base-fee environment, bundle competition, or all-or-nothing
+inclusion behavior. Local tests also do not contact the public RPC or relay endpoints. Before a
+mainnet rescue, use the Sepolia rehearsal checklist with disposable accounts to validate current
+relay compatibility and operational behavior. Even a successful rehearsal cannot guarantee
+mainnet inclusion or prevent an attacker who controls the victim key from winning a nonce race.

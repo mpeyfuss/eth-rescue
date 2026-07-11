@@ -7,6 +7,10 @@ wheels/
 *.egg-info
 *_cache/
 
+# Foundry files
+tests/integration/contracts/cache/
+tests/integration/contracts/out/
+
 # Virtual environments
 .venv
 

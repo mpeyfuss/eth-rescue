@@ -123,13 +123,15 @@ class RelayClient:
             )
             response.raise_for_status()
             payload: RPCResponse[Any] = response.json()
-        except requests.RequestException as e:
+        except (requests.RequestException, ValueError) as e:
             raise RelayError(f"Relay request failed: {e}") from e
 
         if "error" in payload:
             error = payload["error"]
             raise RelayRPCError(error.get("code"), error["message"])
 
+        if "result" not in payload:
+            raise RelayError("Relay response did not include a result")
         return payload["result"]
 
     def simulate(
@@ -164,7 +166,9 @@ class RelayClient:
             ],
         )
 
-        tx_results = result["results"]
+        tx_results = result.get("results")
+        if not isinstance(tx_results, list):
+            raise RelayError("Relay simulation response did not include transaction results")
         simulation: SimulationResult = {
             "bundleHash": result.get("bundleHash", ""),
             "results": tx_results,

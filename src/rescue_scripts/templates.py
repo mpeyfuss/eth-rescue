@@ -60,7 +60,7 @@ def erc1155_transfer(
     return {
         "address": contract,
         "function_signature": "safeTransferFrom(address,address,uint256,uint256,bytes)",
-        "args": [from_victim, to, token_id, amount, "0x"],
+        "args": [from_victim, to, token_id, amount, b""],
         "gas_estimate": GAS_ERC1155,
         "description": f"ERC1155 token #{token_id} x{amount} -> {to}",
     }

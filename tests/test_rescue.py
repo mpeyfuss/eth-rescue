@@ -105,6 +105,59 @@ def test_compute_fees_adds_extra_priority_fee():
     assert max_fee_per_gas == 28_750_000_000
 
 
+def test_compute_fees_rejects_negative_extra_priority_fee():
+    with pytest.raises(ValueError, match="cannot be negative"):
+        rescue._compute_fees(SimpleNamespace(), -0.01)
+
+
+def test_estimate_gas_uses_buffered_rpc_estimate():
+    w3 = SimpleNamespace(
+        eth=SimpleNamespace(estimate_gas=lambda transaction: 40_000)
+    )
+
+    assert rescue._estimate_gas(w3, "victim", "target", "0x1234", 99_000) == 50_000
+
+
+def test_estimate_gas_uses_fallback_and_warns_on_rpc_failure(monkeypatch):
+    warnings = []
+
+    def fail(transaction):
+        raise RuntimeError("execution reverted")
+
+    w3 = SimpleNamespace(eth=SimpleNamespace(estimate_gas=fail))
+    monkeypatch.setattr(rescue.ui, "warning", warnings.append)
+
+    assert rescue._estimate_gas(w3, "victim", "target", "0x1234", 99_000) == 99_000
+    assert warnings == [
+        "Could not estimate gas for target (execution reverted); using fallback 99000"
+    ]
+
+
+def test_required_funding_accounts_for_optional_undelegation():
+    prepared = [{"to": "target", "data": "0x", "gas": 50_000}]
+    max_fee = 20
+    effective_fee = 10
+    victim_funding = 50_000 * max_fee + rescue.SWEEP_TX_GAS * effective_fee
+
+    plain = rescue._required_funding(
+        prepared, max_fee, effective_fee, needs_undelegation=False
+    )
+    delegated = rescue._required_funding(
+        prepared, max_fee, effective_fee, needs_undelegation=True
+    )
+
+    assert plain == int(
+        (victim_funding + rescue.FUNDING_TX_GAS * max_fee) * rescue.FUNDING_BUFFER
+    )
+    assert delegated == int(
+        (
+            victim_funding
+            + (rescue.FUNDING_TX_GAS + rescue.UNDELEGATE_TX_GAS) * max_fee
+        )
+        * rescue.FUNDING_BUFFER
+    )
+
+
 def test_build_bundle_sets_priority_fee_on_every_transaction(monkeypatch):
     account = FakeAccount()
     w3 = SimpleNamespace(
@@ -190,6 +243,29 @@ def test_build_bundle_skips_undelegation_for_plain_eoa():
     ]
     txs = [tx for tx, _private_key in account.signed_txs]
     assert [tx["nonce"] for tx in txs] == [2, 9, 10]
+
+
+def test_build_bundle_omits_zero_value_sweep():
+    account = FakeAccount()
+    w3 = SimpleNamespace(eth=SimpleNamespace(chain_id=1, account=account))
+
+    bundle = rescue._build_bundle(
+        w3,
+        victim=FakeSigner("victim", "victim-key"),
+        gas=FakeSigner("gas", "gas-key"),
+        prepared=[{"to": "target", "data": "0x1234", "gas": 50_000}],
+        safe_address="safe",
+        priority_fee=1,
+        max_fee_per_gas=20,
+        effective_fee_cap=20,
+        victim_nonce=9,
+        gas_nonce=2,
+        victim_balance=0,
+        needs_undelegation=False,
+    )
+
+    assert len(bundle) == 2
+    assert [tx["to"] for tx, _key in account.signed_txs] == ["victim", "target"]
 
 
 def test_has_7702_delegation_recognizes_only_delegation_designator():
@@ -335,6 +411,25 @@ def test_simulate_bundle_returns_false_for_rpc_exception(monkeypatch):
     assert errors == ["Bundle simulation failed: relay unavailable"]
 
 
+def test_simulate_prepared_bundle_rejects_incomplete_result(monkeypatch):
+    errors = []
+    w3 = FakeWeb3(
+        FakeFlashbots(
+            {"bundleHash": "0xbundle", "results": [], "totalGasUsed": 0}
+        )
+    )
+    monkeypatch.setattr(rescue.ui, "info", lambda message: None)
+    monkeypatch.setattr(rescue.ui, "error", errors.append)
+    monkeypatch.setattr(rescue.ui.console, "status", lambda message: DummyStatus())
+
+    outcome = rescue.simulate_prepared_bundle(w3, _prepared_bundle())
+
+    assert not outcome
+    assert errors == [
+        "Relay simulation response did not include every bundle transaction"
+    ]
+
+
 # ---------------------------------------------------------------------------
 # send_with_retry / wait_for_funding (Layer 2: faked chain surface)
 # ---------------------------------------------------------------------------
@@ -342,11 +437,17 @@ VICTIM = SimpleNamespace(address="victim-addr", key="victim-key")
 GAS = SimpleNamespace(address="gas-addr", key="gas-key")
 
 
-def _receipts():
+class Receipt(SimpleNamespace):
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+
+def _receipts(status=1):
     return [
-        SimpleNamespace(
+        Receipt(
             blockNumber=123,
             transactionHash=SimpleNamespace(hex=lambda: "0xabc"),
+            status=status,
         )
     ]
 
@@ -457,6 +558,38 @@ def test_send_with_retry_loops_until_included(monkeypatch):
     assert _run_send(monkeypatch, flashbots) is True
     assert len(flashbots.sent) == 3
     assert len(prepare_calls) == 3  # fees and nonces refreshed every attempt
+
+
+def test_send_with_retry_submits_fresh_bundle_after_missed_block(monkeypatch):
+    _patch_send(monkeypatch)
+    bundles = iter(
+        [
+            _prepared_bundle(entry=b"first", target_block=101),
+            _prepared_bundle(entry=b"second", target_block=102),
+        ]
+    )
+    monkeypatch.setattr(rescue, "prepare_bundle", lambda *args: next(bundles))
+    flashbots = FakeFlashbotsSender([_not_found(), _receipts()])
+
+    assert _run_send(monkeypatch, flashbots) is True
+    assert flashbots.sent == [
+        ([{"signed_transaction": b"first"}], 101),
+        ([{"signed_transaction": b"second"}], 102),
+    ]
+
+
+def test_send_with_retry_rejects_incomplete_receipts(monkeypatch):
+    _patch_send(monkeypatch)
+    flashbots = FakeFlashbotsSender([[]])
+
+    assert _run_send(monkeypatch, flashbots) is False
+
+
+def test_send_with_retry_rejects_reverted_receipt(monkeypatch):
+    _patch_send(monkeypatch)
+    flashbots = FakeFlashbotsSender([_receipts(status=0)])
+
+    assert _run_send(monkeypatch, flashbots) is False
 
 
 def test_send_with_retry_stops_after_max_attempts_when_user_declines(monkeypatch):

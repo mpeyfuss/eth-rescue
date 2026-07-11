@@ -121,7 +121,7 @@ def test_build_erc1155_action(monkeypatch):
         action["function_signature"]
         == "safeTransferFrom(address,address,uint256,uint256,bytes)"
     )
-    assert action["args"] == [VICTIM, SAFE, 123, 4, "0x"]
+    assert action["args"] == [VICTIM, SAFE, 123, 4, b""]
 
 
 def test_build_erc20_action(monkeypatch):

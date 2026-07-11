@@ -90,12 +90,15 @@ def test_plain_victim_rescues_asset_matrix_and_sweeps_eth(
     assert anvil_w3.eth.get_transaction_count(victim.address) == victim_nonce + 5
     assert anvil_w3.eth.get_transaction_count(gas.address) == gas_nonce + 1
     assert 0 <= anvil_w3.eth.get_balance(victim.address) < bundle.victim_funding
-    assert 0 < gas_balance - anvil_w3.eth.get_balance(gas.address) < bundle.required_funding
+    assert (
+        0
+        < gas_balance - anvil_w3.eth.get_balance(gas.address)
+        < bundle.required_funding
+    )
     assert len(sequential_relay.sent) == rescue.BUNDLE_BLOCK_RANGE
     assert len(sequential_relay.submitted_receipts[0]) == len(bundle.transactions)
     assert all(
-        receipt["status"] == 1
-        for receipt in sequential_relay.submitted_receipts[0]
+        receipt["status"] == 1 for receipt in sequential_relay.submitted_receipts[0]
     )
 
 
@@ -160,8 +163,15 @@ def test_delist_then_transfer_rescues_escrowed_erc721(
         ),
     )
 
-    assert [transaction.action_index for transaction in bundle.transactions if transaction.role == "rescue"] == [0, 1]
-    assert auction.functions.seller(erc721.address, 1).call() == "0x0000000000000000000000000000000000000000"
+    assert [
+        transaction.action_index
+        for transaction in bundle.transactions
+        if transaction.role == "rescue"
+    ] == [0, 1]
+    assert (
+        auction.functions.seller(erc721.address, 1).call()
+        == "0x0000000000000000000000000000000000000000"
+    )
     assert erc721.functions.ownerOf(1).call() == safe.address
     assert len(sequential_relay.sent) == rescue.BUNDLE_BLOCK_RANGE
 

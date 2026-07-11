@@ -147,9 +147,7 @@ def connect(auth: LocalAccount, network: Network) -> RelayWeb3:
     w3 = RelayWeb3(HTTPProvider(network["rpc"]))
     if not w3.is_connected():
         raise ConnectionError(f"Could not connect to {network['label']} RPC")
-    w3.relay = RelayClient(
-        w3, auth, network["relay"], builders=network["builders"]
-    )
+    w3.relay = RelayClient(w3, auth, network["relay"], builders=network["builders"])
     return w3
 
 
@@ -556,9 +554,7 @@ def send_with_retry(
     """Build and simulate once per multi-block submission window."""
     while True:
         for batch_start in range(1, MAX_BLOCK_ATTEMPTS + 1, BUNDLE_BLOCK_RANGE):
-            batch_size = min(
-                BUNDLE_BLOCK_RANGE, MAX_BLOCK_ATTEMPTS - batch_start + 1
-            )
+            batch_size = min(BUNDLE_BLOCK_RANGE, MAX_BLOCK_ATTEMPTS - batch_start + 1)
             batch_end = batch_start + batch_size - 1
             try:
                 bundle = prepare_bundle(
@@ -631,9 +627,7 @@ def send_with_retry(
                         raise RuntimeError("One or more rescue transactions reverted")
                     ui.success("Bundle included.")
                     ui.info(f"Block: {receipts[0].blockNumber}")
-                    ui.info(
-                        f"Tx hashes: {[r.transactionHash.hex() for r in receipts]}"
-                    )
+                    ui.info(f"Tx hashes: {[r.transactionHash.hex() for r in receipts]}")
                     return True
                 except TransactionNotFound:
                     continue

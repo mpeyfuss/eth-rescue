@@ -12,7 +12,6 @@ from typing import Any
 import pytest
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
-from hexbytes import HexBytes
 from web3 import HTTPProvider, Web3
 from web3.types import TxReceipt
 
@@ -75,8 +74,7 @@ def anvil_w3() -> Iterator[Web3]:
             process.kill()
             output, _ = process.communicate(timeout=5)
         pytest.fail(
-            f"Anvil did not start within 10 seconds using {ANVIL_HARDFORK}:\n"
-            + output
+            f"Anvil did not start within 10 seconds using {ANVIL_HARDFORK}:\n" + output
         )
 
     try:
@@ -110,7 +108,9 @@ class SequentialRelay:
         self.sent: list[list[BundleEntry]] = []
         self.submitted_receipts: list[list[TxReceipt]] = []
 
-    def _execute(self, bundle: list[BundleEntry]) -> tuple[list[dict[str, Any]], list[TxReceipt]]:
+    def _execute(
+        self, bundle: list[BundleEntry]
+    ) -> tuple[list[dict[str, Any]], list[TxReceipt]]:
         results: list[dict[str, Any]] = []
         receipts: list[TxReceipt] = []
         for entry in bundle:
@@ -217,6 +217,8 @@ def asset_contracts(anvil_w3: Web3, rescue_accounts):
         contracts["ownable"].functions.transferOwnership(victim.address),
     )
     for call in setup:
-        receipt = anvil_w3.eth.wait_for_transaction_receipt(call.transact({"from": funder}))
+        receipt = anvil_w3.eth.wait_for_transaction_receipt(
+            call.transact({"from": funder})
+        )
         assert receipt["status"] == 1
     return contracts

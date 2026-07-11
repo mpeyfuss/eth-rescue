@@ -1,5 +1,11 @@
 .PHONY: test test-unit test-integration test-all
 
+fmt:
+	uv run ruff format .
+
+lint:
+	uv run ruff check . --fix
+
 test: test-unit
 
 test-unit:

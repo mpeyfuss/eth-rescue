@@ -1,5 +1,5 @@
 [project]
-name = "rescue-scripts"
+name = "eth-rescue"
 version = "0.1.0"
 description = "Whitehat rescue scripts."
 readme = "README.md"

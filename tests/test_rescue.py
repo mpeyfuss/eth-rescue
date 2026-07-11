@@ -84,6 +84,7 @@ def _prepared_bundle(entry=b"signed", required_funding=1000, target_block=101):
         expected_residual=0,
     )
 
+
 def test_compute_fees_adds_extra_priority_fee():
     class FeeWeb3:
         class Eth:
@@ -111,9 +112,7 @@ def test_compute_fees_rejects_negative_extra_priority_fee():
 
 
 def test_estimate_gas_uses_buffered_rpc_estimate():
-    w3 = SimpleNamespace(
-        eth=SimpleNamespace(estimate_gas=lambda transaction: 40_000)
-    )
+    w3 = SimpleNamespace(eth=SimpleNamespace(estimate_gas=lambda transaction: 40_000))
 
     assert rescue._estimate_gas(w3, "victim", "target", "0x1234", 99_000) == 50_000
 
@@ -150,10 +149,7 @@ def test_required_funding_accounts_for_optional_undelegation():
         (victim_funding + rescue.FUNDING_TX_GAS * max_fee) * rescue.FUNDING_BUFFER
     )
     assert delegated == int(
-        (
-            victim_funding
-            + (rescue.FUNDING_TX_GAS + rescue.UNDELEGATE_TX_GAS) * max_fee
-        )
+        (victim_funding + (rescue.FUNDING_TX_GAS + rescue.UNDELEGATE_TX_GAS) * max_fee)
         * rescue.FUNDING_BUFFER
     )
 
@@ -442,9 +438,7 @@ def test_simulate_bundle_returns_false_for_rpc_exception(monkeypatch):
 def test_simulate_prepared_bundle_rejects_incomplete_result(monkeypatch):
     errors = []
     w3 = FakeWeb3(
-        FakeFlashbots(
-            {"bundleHash": "0xbundle", "results": [], "totalGasUsed": 0}
-        )
+        FakeFlashbots({"bundleHash": "0xbundle", "results": [], "totalGasUsed": 0})
     )
     monkeypatch.setattr(rescue.ui, "info", lambda message: None)
     monkeypatch.setattr(rescue.ui, "error", errors.append)
@@ -667,9 +661,7 @@ def test_send_with_retry_rejects_incomplete_receipts(monkeypatch):
 
 def test_send_with_retry_rejects_reverted_receipt(monkeypatch):
     _patch_send(monkeypatch)
-    flashbots = FakeFlashbotsSender(
-        [_receipts(status=0)] * rescue.BUNDLE_BLOCK_RANGE
-    )
+    flashbots = FakeFlashbotsSender([_receipts(status=0)] * rescue.BUNDLE_BLOCK_RANGE)
 
     assert _run_send(monkeypatch, flashbots) is False
 

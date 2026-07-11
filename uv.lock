@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.13"
 
 [options]
-exclude-newer = "2026-07-04T02:28:26.337697Z"
+exclude-newer = "2026-07-04T04:50:43.400841Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -281,6 +281,41 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/58/11/1ed831c50bd74f57829aa06e58bd82a809c37e070ee501c953b9ac1f1552/eth_keys-0.7.0.tar.gz", hash = "sha256:79d24fd876201df67741de3e3fefb3f4dbcbb6ace66e47e6fe662851a4547814", size = 30166, upload-time = "2025-04-07T17:40:21.697Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4d/25/0ae00f2b0095e559d61ad3dc32171bd5a29dfd95ab04b4edd641f7c75f72/eth_keys-0.7.0-py3-none-any.whl", hash = "sha256:b0cdda8ffe8e5ba69c7c5ca33f153828edcace844f67aabd4542d7de38b159cf", size = 20656, upload-time = "2025-04-07T17:40:20.441Z" },
+]
+
+[[package]]
+name = "eth-rescue"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "eth-abi" },
+    { name = "eth-utils" },
+    { name = "questionary" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "web3" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "eth-abi", specifier = ">=5.2.0" },
+    { name = "eth-utils", specifier = ">=4.1.1" },
+    { name = "questionary", specifier = ">=2.1.0" },
+    { name = "requests", specifier = ">=2.32" },
+    { name = "rich", specifier = ">=14.0.0" },
+    { name = "web3", specifier = ">=7.16,<8" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0.0" },
+    { name = "ruff", specifier = ">=0.12.12" },
 ]
 
 [[package]]
@@ -753,41 +788,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c9/74/b3ff8e6c8446842c3f5c837e9c3dfcfe2018ea6ecef224c710c85ef728f4/requests-2.32.5.tar.gz", hash = "sha256:dbba0bac56e100853db0ea71b82b4dfd5fe2bf6d3754a8893c3af500cec7d7cf", size = 134517, upload-time = "2025-08-18T20:46:02.573Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/db/4254e3eabe8020b458f1a747140d32277ec7a271daf1d235b70dc0b4e6e3/requests-2.32.5-py3-none-any.whl", hash = "sha256:2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6", size = 64738, upload-time = "2025-08-18T20:46:00.542Z" },
-]
-
-[[package]]
-name = "rescue-scripts"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "eth-abi" },
-    { name = "eth-utils" },
-    { name = "questionary" },
-    { name = "requests" },
-    { name = "rich" },
-    { name = "web3" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "eth-abi", specifier = ">=5.2.0" },
-    { name = "eth-utils", specifier = ">=4.1.1" },
-    { name = "questionary", specifier = ">=2.1.0" },
-    { name = "requests", specifier = ">=2.32" },
-    { name = "rich", specifier = ">=14.0.0" },
-    { name = "web3", specifier = ">=7.16,<8" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.0.0" },
-    { name = "ruff", specifier = ">=0.12.12" },
 ]
 
 [[package]]

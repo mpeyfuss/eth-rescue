@@ -56,9 +56,7 @@ def test_send_bundle_signs_exact_json_rpc_body(monkeypatch):
     assert body["params"] == [
         {"txs": ["0x1234"], "blockNumber": "0x2a", "builders": ["builder"]}
     ]
-    assert request["headers"]["X-Flashbots-Signature"].startswith(
-        f"{signer.address}:"
-    )
+    assert request["headers"]["X-Flashbots-Signature"].startswith(f"{signer.address}:")
     address, signature = request["headers"]["X-Flashbots-Signature"].split(":")
     digest = Web3.keccak(text=request["data"]).to_0x_hex()
     assert digest.startswith("0x")
@@ -76,8 +74,7 @@ def test_send_bundle_omits_builders_when_not_configured(monkeypatch):
     monkeypatch.setattr(
         client,
         "_request",
-        lambda method, params: request_params.extend(params)
-        or {"bundleHash": "0xabc"},
+        lambda method, params: request_params.extend(params) or {"bundleHash": "0xabc"},
     )
 
     client.send_bundle(
@@ -184,7 +181,11 @@ def test_request_raises_typed_rpc_error(monkeypatch):
     monkeypatch.setattr(
         "rescue_scripts.relay.requests.post",
         lambda *args, **kwargs: Response(
-            {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "bad bundle"}}
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32000, "message": "bad bundle"},
+            }
         ),
     )
 

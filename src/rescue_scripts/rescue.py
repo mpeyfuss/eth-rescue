@@ -1,17 +1,15 @@
-from typing import cast
-
 import rlp
 from eth_account.account import Account
 from eth_account.signers.local import LocalAccount
 from eth_keys import keys
-from eth_utils import keccak, to_hex
+from eth_utils import is_address, keccak, to_checksum_address, to_hex
 from hexbytes import HexBytes
 from web3 import HTTPProvider, Web3
 from web3.exceptions import TransactionNotFound
 
 from rescue_scripts import ui
 from rescue_scripts.calldata import build_calldata
-from rescue_scripts.flashbots import FlashbotsWeb3, flashbot
+from rescue_scripts.relay import RelayClient, RelayWeb3
 from rescue_scripts.prompts import (
     pause,
     prompt_address,
@@ -22,23 +20,29 @@ from rescue_scripts.prompts import (
 )
 from rescue_scripts.types import (
     BundleEntry,
+    BundleTransaction,
     Network,
     PreparedAction,
+    PreparedBundle,
     RescueData,
-    SimulationResult,
+    SimulationFailure,
+    SimulationOutcome,
 )
-from rescue_scripts.wizard import build_rescue_data
+from rescue_scripts.templates import GAS_GENERIC
+from rescue_scripts.wizard import build_rescue_data, revise_rescue_data
 
 NETWORKS: dict[str, Network] = {
     "mainnet": {
         "label": "Ethereum mainnet",
         "rpc": "https://ethereum-rpc.publicnode.com",
         "relay": "https://relay.flashbots.net",
+        "chain_id": 1,
     },
     "sepolia": {
         "label": "Sepolia (testnet)",
         "rpc": "https://ethereum-sepolia-rpc.publicnode.com",
         "relay": "https://relay-sepolia.flashbots.net",
+        "chain_id": 11155111,
     },
 }
 
@@ -98,7 +102,11 @@ def _setup_gas_account() -> LocalAccount:
         ],
         style="yellow",
     )
-    pause("Press any key once you've saved the private key")
+    if not prompt_yes_no(
+        "I have securely saved this private key and cleared visible terminal history",
+        default=False,
+    ):
+        raise KeyboardInterrupt
     return acct
 
 
@@ -133,13 +141,38 @@ def choose_network() -> Network:
 # ---------------------------------------------------------------------------
 # Step 3: connect, estimate gas, preview cost
 # ---------------------------------------------------------------------------
-def connect(auth: LocalAccount, network: Network) -> FlashbotsWeb3:
-    w3 = Web3(HTTPProvider(network["rpc"]))
-    return flashbot(w3, auth, network["relay"])
+def connect(auth: LocalAccount, network: Network) -> RelayWeb3:
+    w3 = RelayWeb3(HTTPProvider(network["rpc"]))
+    if not w3.is_connected():
+        raise ConnectionError(f"Could not connect to {network['label']} RPC")
+    w3.relay = RelayClient(w3, auth, network["relay"])
+    return w3
+
+
+def validate_accounts_and_destination(
+    victim: LocalAccount, gas: LocalAccount, safe_address: str
+) -> str:
+    if victim.address.lower() == gas.address.lower():
+        raise ValueError("Gas wallet must be different from the compromised wallet")
+    if not is_address(safe_address):
+        raise ValueError("Safe wallet is not a valid Ethereum address")
+    safe_address = to_checksum_address(safe_address)
+    if safe_address.lower() in {victim.address.lower(), gas.address.lower()}:
+        raise ValueError("Safe wallet must differ from victim and gas wallets")
+    return safe_address
+
+
+def validate_network(w3: Web3, network: Network) -> None:
+    if w3.eth.chain_id != network["chain_id"]:
+        raise ConnectionError(
+            f"RPC chain ID {w3.eth.chain_id} does not match expected {network['chain_id']}"
+        )
 
 
 def _compute_fees(w3: Web3, extra_priority_fee_gwei: float) -> tuple[int, int]:
     """Return (priority_fee, max_fee_per_gas) from the latest block."""
+    if extra_priority_fee_gwei < 0:
+        raise ValueError("Extra priority fee cannot be negative")
     base_fee = int(w3.eth.get_block("latest")["baseFeePerGas"] * 1.25)
     priority_fee = w3.eth.max_priority_fee + w3.to_wei(extra_priority_fee_gwei, "gwei")
     max_fee_per_gas = 2 * base_fee + priority_fee
@@ -155,13 +188,15 @@ def prepare_actions(
     w3: Web3, victim: str, rescue_data: list[RescueData]
 ) -> list[PreparedAction]:
     """Encode calldata and estimate gas once per action."""
-    if not isinstance(rescue_data, list) or not rescue_data:
+    if not rescue_data:
         raise ValueError("No rescue actions provided")
     prepared: list[PreparedAction] = []
     for data in rescue_data:
+        fallback = data.get("gas_estimate", GAS_GENERIC)
         tx_data = build_calldata(data["function_signature"], data["args"])
-        gas = _estimate_gas(w3, victim, data["address"], tx_data, data["gas_estimate"])
-        prepared.append({"to": data["address"], "data": tx_data, "gas": gas})
+        target = to_checksum_address(data["address"])
+        gas = _estimate_gas(w3, victim, target, tx_data, fallback)
+        prepared.append({"to": target, "data": tx_data, "gas": gas})
     return prepared
 
 
@@ -242,13 +277,6 @@ def _sign_hash(private_key: bytes, message_hash: bytes) -> tuple[int, int, int]:
     return signature.v, signature.r, signature.s
 
 
-def _signed_raw_transaction(signed) -> HexBytes:
-    raw = getattr(signed, "rawTransaction", None)
-    if raw is None:
-        raw = signed.raw_transaction
-    return cast(HexBytes, raw)
-
-
 def _sign_7702_undelegation(
     *,
     chain_id: int,
@@ -292,13 +320,6 @@ def _sign_7702_undelegation(
         bytes([SET_CODE_TX_TYPE])
         + rlp.encode(unsigned_payload + [tx_y_parity, tx_r, tx_s])
     )
-
-
-def _safe_victim_balance(w3: Web3, address: str) -> int:
-    try:
-        return w3.eth.get_balance(address)
-    except Exception:
-        return 0
 
 
 def _build_bundle(
@@ -366,33 +387,26 @@ def _build_bundle(
     if sweep_value:
         signed.append(w3.eth.account.sign_transaction(sweep_tx, private_key=victim.key))
     return [{"signed_transaction": undelegate_tx}] + [
-        {"signed_transaction": _signed_raw_transaction(s)} for s in signed
+        {"signed_transaction": s.raw_transaction} for s in signed
     ]
 
 
-def _simulation_has_failures(result: SimulationResult) -> bool:
-    return any(
-        bool(tx_result.get("error") or tx_result.get("revert"))
-        for tx_result in result.get("results", [])
-    )
-
-
-def simulate_bundle(
-    w3: FlashbotsWeb3,
+def prepare_bundle(
+    w3: Web3,
     victim: LocalAccount,
     gas: LocalAccount,
     prepared: list[PreparedAction],
     safe_address: str,
     extra_priority_fee_gwei: float,
-) -> bool:
-    """Simulate the exact funding + rescue bundle before asking to send it."""
-    ui.section("Step 5: Simulate the rescue bundle")
+) -> PreparedBundle:
+    """Build one immutable bundle for the next block from current chain state."""
     victim_nonce = w3.eth.get_transaction_count(victim.address)
     gas_nonce = w3.eth.get_transaction_count(gas.address)
     priority_fee, max_fee_per_gas = _compute_fees(w3, extra_priority_fee_gwei)
     effective_fee_cap = _max_next_block_effective_fee(w3, priority_fee)
     target_block = w3.eth.block_number + 1
-    bundle = _build_bundle(
+    victim_balance = w3.eth.get_balance(victim.address)
+    entries = _build_bundle(
         w3,
         victim,
         gas,
@@ -403,77 +417,163 @@ def simulate_bundle(
         effective_fee_cap,
         victim_nonce,
         gas_nonce,
-        _safe_victim_balance(w3, victim.address),
+        victim_balance,
+    )
+    victim_funding = _victim_funding_value(
+        prepared, max_fee_per_gas, effective_fee_cap
+    )
+    rescue_cost = sum(action["gas"] * max_fee_per_gas for action in prepared)
+    rescue_fee_cap = sum(action["gas"] * effective_fee_cap for action in prepared)
+    sweep_value = max(0, victim_balance + rescue_cost - rescue_fee_cap)
+    roles = [BundleTransaction("undelegate", entries[0]["signed_transaction"])]
+    roles.append(BundleTransaction("fund", entries[1]["signed_transaction"]))
+    for action_index, entry in enumerate(entries[2 : 2 + len(prepared)]):
+        roles.append(
+            BundleTransaction(
+                "rescue", entry["signed_transaction"], action_index=action_index
+            )
+        )
+    if len(entries) > 2 + len(prepared):
+        roles.append(BundleTransaction("sweep", entries[-1]["signed_transaction"]))
+    return PreparedBundle(
+        transactions=roles,
+        victim_nonce=victim_nonce,
+        gas_nonce=gas_nonce,
+        priority_fee=priority_fee,
+        max_fee_per_gas=max_fee_per_gas,
+        effective_fee_cap=effective_fee_cap,
+        target_block=target_block,
+        required_funding=_required_funding(
+            prepared, max_fee_per_gas, effective_fee_cap
+        ),
+        victim_funding=victim_funding,
+        sweep_value=sweep_value,
+        expected_residual=0,
     )
 
+
+def simulate_prepared_bundle(
+    w3: RelayWeb3, bundle: PreparedBundle
+) -> SimulationOutcome:
+    """Simulate the exact immutable bundle that may subsequently be submitted."""
     ui.info(
-        f"Simulating bundle for block {target_block} "
-        f"@ {w3.from_wei(max_fee_per_gas, 'gwei')} gwei ..."
+        f"Simulating bundle for block {bundle.target_block} "
+        f"@ {w3.from_wei(bundle.max_fee_per_gas, 'gwei')} gwei ..."
     )
     try:
         with ui.console.status("Running Flashbots simulation..."):
-            result = cast(
-                SimulationResult,
-                w3.flashbots.simulate(bundle, block_tag=target_block),
+            result = w3.relay.simulate(
+                bundle.entries, block_tag=bundle.target_block
             )
     except Exception as e:
-        ui.error(f"Bundle simulation failed: {e}")
-        return False
+        failure = SimulationFailure(f"Bundle simulation failed: {e}")
+        ui.error(failure.message)
+        return SimulationOutcome(False, bundle=bundle, failures=(failure,))
+
+    if len(result["results"]) != len(bundle.transactions):
+        failure = SimulationFailure(
+            "Relay simulation response did not include every bundle transaction"
+        )
+        ui.error(failure.message)
+        return SimulationOutcome(False, bundle=bundle, result=result, failures=(failure,))
 
     ui.render_simulation_result(result)
-    if _simulation_has_failures(result):
-        ui.error("Simulation completed, but one or more transactions failed.")
-        return False
+    failures: list[SimulationFailure] = []
+    for index, tx_result in enumerate(result["results"]):
+        message = tx_result.get("error") or tx_result.get("revert")
+        if not message:
+            continue
+        transaction = bundle.transactions[index]
+        failures.append(
+            SimulationFailure(
+                str(message),
+                transaction_index=index,
+                role=transaction.role,
+                action_index=transaction.action_index,
+            )
+        )
+    if failures:
+        for failure in failures:
+            label = (
+                f"action #{failure.action_index + 1}"
+                if failure.action_index is not None
+                else failure.role or "unknown transaction"
+            )
+            ui.error(f"Simulation failed at {label}: {failure.message}")
+        return SimulationOutcome(
+            False, bundle=bundle, result=result, failures=tuple(failures)
+        )
 
     ui.success("Simulation succeeded. The bundle executed without reported reverts.")
-    return True
+    return SimulationOutcome(True, bundle=bundle, result=result)
+
+
+def simulate_bundle(
+    w3: RelayWeb3,
+    victim: LocalAccount,
+    gas: LocalAccount,
+    prepared: list[PreparedAction],
+    safe_address: str,
+    extra_priority_fee_gwei: float,
+) -> SimulationOutcome:
+    """Simulate the exact funding + rescue bundle before asking to send it."""
+    ui.section("Step 5: Simulate the rescue bundle")
+    try:
+        bundle = prepare_bundle(
+            w3, victim, gas, prepared, safe_address, extra_priority_fee_gwei
+        )
+    except Exception as e:
+        failure = SimulationFailure(f"Could not prepare bundle: {e}")
+        ui.error(failure.message)
+        return SimulationOutcome(False, failures=(failure,))
+    return simulate_prepared_bundle(w3, bundle)
 
 
 def send_with_retry(
-    w3: FlashbotsWeb3,
+    w3: RelayWeb3,
     victim: LocalAccount,
     gas: LocalAccount,
     prepared: list[PreparedAction],
     safe_address: str,
     extra_priority_fee_gwei: float,
 ) -> bool:
-    """Resend the bundle each block (refreshing fees) until included or aborted."""
-    victim_nonce = w3.eth.get_transaction_count(victim.address)
-    gas_nonce = w3.eth.get_transaction_count(gas.address)
-
+    """Build, simulate, and submit a fresh exact bundle for each target block."""
     while True:
         for attempt in range(1, MAX_BLOCK_ATTEMPTS + 1):
-            priority_fee, max_fee_per_gas = _compute_fees(w3, extra_priority_fee_gwei)
-            effective_fee_cap = _max_next_block_effective_fee(w3, priority_fee)
-
-            # ensure the gas wallet can still cover the (possibly higher) fees
-            needed = _required_funding(prepared, max_fee_per_gas, effective_fee_cap)
-            if w3.eth.get_balance(gas.address) < needed:
-                ui.warning("Gas wallet balance dropped below requirement (fees rose).")
-                wait_for_funding(w3, gas.address, needed)
-
-            bundle = _build_bundle(
-                w3,
-                victim,
-                gas,
-                prepared,
-                safe_address,
-                priority_fee,
-                max_fee_per_gas,
-                effective_fee_cap,
-                victim_nonce,
-                gas_nonce,
-                _safe_victim_balance(w3, victim.address),
-            )
-            target_block = w3.eth.block_number + 1
-            result = w3.flashbots.send_bundle(bundle, target_block_number=target_block)
-            ui.info(
-                f"Attempt {attempt}/{MAX_BLOCK_ATTEMPTS} -> block {target_block} "
-                f"@ {w3.from_wei(max_fee_per_gas, 'gwei')} gwei ..."
-            )
-            with ui.console.status("Waiting for bundle result..."):
-                result.wait()
             try:
+                bundle = prepare_bundle(
+                    w3,
+                    victim,
+                    gas,
+                    prepared,
+                    safe_address,
+                    extra_priority_fee_gwei,
+                )
+                gas_balance = w3.eth.get_balance(gas.address)
+            except Exception as e:
+                ui.error(f"Could not prepare the next bundle: {e}")
+                return False
+
+            if gas_balance < bundle.required_funding:
+                ui.warning("Gas wallet balance dropped below requirement (fees rose).")
+                wait_for_funding(w3, gas.address, bundle.required_funding)
+                continue
+
+            simulation = simulate_prepared_bundle(w3, bundle)
+            if not simulation:
+                ui.error("Submission blocked because the exact bundle did not simulate cleanly.")
+                return False
+
+            ui.info(
+                f"Attempt {attempt}/{MAX_BLOCK_ATTEMPTS} -> block {bundle.target_block} "
+                f"@ {w3.from_wei(bundle.max_fee_per_gas, 'gwei')} gwei ..."
+            )
+            try:
+                result = w3.relay.send_bundle(
+                    bundle.entries, target_block_number=bundle.target_block
+                )
+                with ui.console.status("Waiting for bundle result..."):
+                    result.wait()
                 receipts = result.receipts()
                 ui.success("Bundle included.")
                 ui.info(f"Block: {receipts[0].blockNumber}")
@@ -481,6 +581,9 @@ def send_with_retry(
                 return True
             except TransactionNotFound:
                 continue
+            except Exception as e:
+                ui.error(f"Relay submission failed: {e}")
+                return False
 
         if not prompt_yes_no(
             f"\nNot included after {MAX_BLOCK_ATTEMPTS} blocks. Keep trying?",
@@ -501,20 +604,38 @@ def run() -> None:
 
     # Step 1: set up accounts (need the victim address to build the plan)
     victim, gas, auth = load_accounts()
-    w3 = connect(auth, network)
+    try:
+        w3 = connect(auth, network)
+        validate_network(w3, network)
+    except Exception as e:
+        ui.error(f"Network setup failed: {e}")
+        return
 
     # Step 2: build or load the plan
     ui.section("Step 2: Build the rescue plan")
     safe_wallet = prompt_address("Safe wallet to receive rescued assets and ETH")
+    try:
+        safe_wallet = validate_accounts_and_destination(victim, gas, safe_wallet)
+    except ValueError as e:
+        ui.error(str(e))
+        return
     rescue_data = build_rescue_data(victim.address, safe_wallet)
 
     # Step 3: estimate gas + preview cost
     extra_priority_fee = prompt_float("Extra priority fee to add (gwei)", default=0.0)
-    with ui.console.status("Preparing actions and estimating gas..."):
-        prepared = prepare_actions(w3, victim.address, rescue_data)
-        priority_fee, max_fee_per_gas = _compute_fees(w3, extra_priority_fee)
-        effective_fee_cap = _max_next_block_effective_fee(w3, priority_fee)
+    try:
+        with ui.console.status("Preparing actions and estimating gas..."):
+            prepared = prepare_actions(w3, victim.address, rescue_data)
+            priority_fee, max_fee_per_gas = _compute_fees(w3, extra_priority_fee)
+            effective_fee_cap = _max_next_block_effective_fee(w3, priority_fee)
+    except Exception as e:
+        ui.error(f"Could not prepare the rescue plan: {e}")
+        return
     preview(w3, prepared, max_fee_per_gas)
+    ui.warning(
+        "Funding uses conservative gas limits. Unused-gas savings may remain in the "
+        "victim wallet after the guaranteed sweep amount is sent."
+    )
 
     if not prompt_yes_no("\nProceed to funding?", default=True):
         ui.warning("Aborted. Nothing was sent.")
@@ -528,18 +649,71 @@ def run() -> None:
     )
 
     # Step 5: simulate, confirm, and send (retry across blocks)
-    simulation_ok = simulate_bundle(
-        w3, victim, gas, prepared, safe_wallet, extra_priority_fee
-    )
-    if not simulation_ok and not prompt_yes_no(
-        "Simulation did not pass cleanly. Continue anyway?",
-        default=False,
-    ):
-        ui.warning("Aborted. Nothing was sent.")
-        return
+    while True:
+        simulation = simulate_bundle(
+            w3, victim, gas, prepared, safe_wallet, extra_priority_fee
+        )
+        if simulation:
+            ui.section("Step 6: Send the rescue bundle")
+            if not prompt_yes_no("Send the rescue bundle now?", default=True):
+                ui.warning("Aborted. Nothing was sent.")
+                return
+            if send_with_retry(
+                w3, victim, gas, prepared, safe_wallet, extra_priority_fee
+            ):
+                return
+            ui.warning(
+                "The bundle was not included. You can revise and simulate again; "
+                "nothing will be sent without another clean simulation."
+            )
+            failing_action = None
+        else:
+            failing_action = next(
+                (
+                    failure.action_index
+                    for failure in simulation.failures
+                    if failure.action_index is not None
+                ),
+                None,
+            )
 
-    ui.section("Step 6: Send the rescue bundle")
-    if not prompt_yes_no("Send the rescue bundle now?", default=True):
-        ui.warning("Aborted. Nothing was sent.")
-        return
-    send_with_retry(w3, victim, gas, prepared, safe_wallet, extra_priority_fee)
+        correction = prompt_select(
+            "What would you like to change before the next simulation?",
+            [
+                ("Edit or remove rescue actions", "plan"),
+                ("Change the extra priority fee", "fee"),
+                ("Retry with fresh chain state", "retry"),
+                ("Cancel without sending", "cancel"),
+            ],
+        )
+        if correction == "cancel":
+            ui.warning("Aborted. Nothing was sent.")
+            return
+        if correction == "fee":
+            extra_priority_fee = prompt_float(
+                "Extra priority fee to add (gwei)", default=extra_priority_fee
+            )
+        elif correction == "plan":
+            revised = revise_rescue_data(
+                rescue_data, safe_wallet, victim.address, failing_action
+            )
+            if revised is None:
+                ui.warning("Aborted. Nothing was sent.")
+                return
+            rescue_data = revised
+        try:
+            with ui.console.status("Rebuilding and estimating the rescue plan..."):
+                prepared = prepare_actions(w3, victim.address, rescue_data)
+                priority_fee, max_fee_per_gas = _compute_fees(
+                    w3, extra_priority_fee
+                )
+                effective_fee_cap = _max_next_block_effective_fee(w3, priority_fee)
+            preview(w3, prepared, max_fee_per_gas)
+            wait_for_funding(
+                w3,
+                gas.address,
+                _required_funding(prepared, max_fee_per_gas, effective_fee_cap),
+            )
+        except Exception as e:
+            ui.error(f"Could not rebuild the rescue plan: {e}")
+            return

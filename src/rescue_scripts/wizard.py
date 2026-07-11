@@ -14,6 +14,8 @@ from rescue_scripts.prompts import (
     prompt_yes_no,
 )
 from rescue_scripts.types import RescueData
+from rescue_scripts.templates import GAS_GENERIC
+from eth_utils import is_address, to_checksum_address
 
 CONFIG_DIR = "configs"
 
@@ -32,6 +34,16 @@ def _validate_actions(data: object) -> list[RescueData]:
             raise ValueError(f"action #{i} is missing keys: {', '.join(missing)}")
         if not isinstance(action["args"], list):
             raise ValueError(f"action #{i} 'args' must be a JSON array")
+        if not is_address(action["address"]):
+            raise ValueError(f"action #{i} has an invalid contract address")
+        signature = action["function_signature"]
+        if not isinstance(signature, str) or "(" not in signature or not signature.endswith(")"):
+            raise ValueError(f"action #{i} has an invalid function signature")
+        gas_estimate = action.get("gas_estimate", GAS_GENERIC)
+        if isinstance(gas_estimate, bool) or not isinstance(gas_estimate, int) or gas_estimate <= 0:
+            raise ValueError(f"action #{i} 'gas_estimate' must be a positive integer")
+        action["address"] = to_checksum_address(action["address"])
+        action["gas_estimate"] = gas_estimate
     return data
 
 
@@ -127,6 +139,46 @@ def _build_action(safe_wallet: str, victim_hint: str) -> RescueData | None:
 def print_plan(actions: list[RescueData]) -> None:
     """Render the list of rescue actions in plain English."""
     ui.render_rescue_plan(actions)
+
+
+def revise_rescue_data(
+    actions: list[RescueData],
+    safe_wallet: str,
+    victim_address: str,
+    failing_action_index: int | None = None,
+) -> list[RescueData] | None:
+    """Interactively revise a plan after simulation failure."""
+    revised = list(actions)
+    while True:
+        choices = []
+        if failing_action_index is not None and failing_action_index < len(revised):
+            choices.append((f"Remove failing action #{failing_action_index + 1}", "remove"))
+        choices.extend(
+            [
+                ("Add another action", "add"),
+                ("Rebuild the entire plan", "rebuild"),
+                ("Use this revised plan", "finish"),
+                ("Cancel without sending", "cancel"),
+            ]
+        )
+        choice = prompt_select("How do you want to correct the rescue plan?", choices)
+        if choice == "remove":
+            revised.pop(failing_action_index)
+            failing_action_index = None
+            print_plan(revised)
+        elif choice == "add":
+            action = _build_action(safe_wallet, victim_address)
+            if action is not None:
+                revised.append(action)
+                print_plan(revised)
+        elif choice == "rebuild":
+            return build_rescue_data(victim_address, safe_wallet)
+        elif choice == "finish":
+            if revised:
+                return revised
+            ui.warning("A rescue plan must contain at least one action.")
+        else:
+            return None
 
 
 def save_config(actions: list[RescueData]) -> None:

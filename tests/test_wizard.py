@@ -155,7 +155,7 @@ def test_load_config_retries_invalid_then_loads_valid(tmp_path, monkeypatch):
     monkeypatch.setattr(wizard.ui, "warning", warnings.append)
     monkeypatch.setattr(wizard.ui, "success", lambda message: None)
 
-    assert wizard._load_config() == expected
+    assert wizard._load_config() == [expected[0] | {"gas_estimate": 150_000}]
     assert len(warnings) == 1
 
 

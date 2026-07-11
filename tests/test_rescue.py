@@ -2,9 +2,16 @@ from types import SimpleNamespace
 
 import rlp
 from eth_account.account import Account
+from eth_keys import keys
+from eth_utils import keccak
 from web3.exceptions import TransactionNotFound
 
 from rescue_scripts import rescue
+from rescue_scripts.types import (
+    BundleTransaction,
+    PreparedBundle,
+    SimulationOutcome,
+)
 
 
 class FakeSigner:
@@ -19,7 +26,7 @@ class FakeAccount:
 
     def sign_transaction(self, tx, private_key=None):
         self.signed_txs.append((tx, private_key))
-        return SimpleNamespace(rawTransaction=f"signed-{len(self.signed_txs)}")
+        return SimpleNamespace(raw_transaction=f"signed-{len(self.signed_txs)}")
 
 
 class FakeEth:
@@ -43,9 +50,9 @@ class FakeFlashbots:
 
 
 class FakeWeb3:
-    def __init__(self, flashbots):
+    def __init__(self, relay):
         self.eth = FakeEth()
-        self.flashbots = flashbots
+        self.relay = relay
 
     def from_wei(self, value, unit):
         if unit == "gwei":
@@ -60,6 +67,21 @@ class DummyStatus:
     def __exit__(self, exc_type, exc, tb):
         return None
 
+
+def _prepared_bundle(entry=b"signed", required_funding=1000, target_block=101):
+    return PreparedBundle(
+        transactions=[BundleTransaction("undelegate", entry)],
+        victim_nonce=7,
+        gas_nonce=3,
+        priority_fee=1,
+        max_fee_per_gas=20_000_000_000,
+        effective_fee_cap=2,
+        target_block=target_block,
+        required_funding=required_funding,
+        victim_funding=0,
+        sweep_value=0,
+        expected_residual=0,
+    )
 
 def test_compute_fees_adds_extra_priority_fee():
     class FeeWeb3:
@@ -162,6 +184,23 @@ def test_sign_7702_undelegation_builds_type_4_clear_authorization():
     assert authorization[0] == b"\x01"
     assert authorization[1] == b"\x00" * 20
     assert authorization[2] == b"\x09"
+    assert int.from_bytes(decoded[4]) == rescue.UNDELEGATE_TX_GAS
+
+    auth_hash = keccak(
+        bytes([rescue.SET_CODE_MAGIC])
+        + rlp.encode([1, b"\x00" * 20, 9])
+    )
+    auth_signature = keys.Signature(
+        vrs=tuple(int.from_bytes(value) for value in authorization[3:6])
+    )
+    assert auth_signature.recover_public_key_from_msg_hash(auth_hash).to_checksum_address() == victim.address
+
+    unsigned_payload = decoded[:10]
+    tx_hash = keccak(bytes([rescue.SET_CODE_TX_TYPE]) + rlp.encode(unsigned_payload))
+    tx_signature = keys.Signature(
+        vrs=tuple(int.from_bytes(value) for value in decoded[10:13])
+    )
+    assert tx_signature.recover_public_key_from_msg_hash(tx_hash).to_checksum_address() == gas.address
 
 
 def test_simulate_bundle_returns_true_for_clean_result(monkeypatch):
@@ -176,11 +215,7 @@ def test_simulate_bundle_returns_true_for_clean_result(monkeypatch):
 
     monkeypatch.setattr(rescue, "_compute_fees", lambda w3, fee: (1, 20_000_000_000))
     monkeypatch.setattr(rescue, "_max_next_block_effective_fee", lambda w3, fee: 2)
-    monkeypatch.setattr(
-        rescue,
-        "_build_bundle",
-        lambda *args: [{"signed_transaction": b"signed"}],
-    )
+    monkeypatch.setattr(rescue, "prepare_bundle", lambda *args: _prepared_bundle())
     monkeypatch.setattr(rescue.ui, "section", lambda message: None)
     monkeypatch.setattr(rescue.ui, "info", lambda message: None)
     monkeypatch.setattr(rescue.ui, "success", lambda message: None)
@@ -215,7 +250,7 @@ def test_simulate_bundle_returns_false_for_revert(monkeypatch):
 
     monkeypatch.setattr(rescue, "_compute_fees", lambda w3, fee: (1, 20_000_000_000))
     monkeypatch.setattr(rescue, "_max_next_block_effective_fee", lambda w3, fee: 2)
-    monkeypatch.setattr(rescue, "_build_bundle", lambda *args: [])
+    monkeypatch.setattr(rescue, "prepare_bundle", lambda *args: _prepared_bundle())
     monkeypatch.setattr(rescue.ui, "section", lambda message: None)
     monkeypatch.setattr(rescue.ui, "info", lambda message: None)
     monkeypatch.setattr(rescue.ui, "error", errors.append)
@@ -234,7 +269,7 @@ def test_simulate_bundle_returns_false_for_revert(monkeypatch):
         "safe",
         0.0,
     )
-    assert errors == ["Simulation completed, but one or more transactions failed."]
+    assert errors == ["Simulation failed at undelegate: nope"]
 
 
 def test_simulate_bundle_returns_false_for_rpc_exception(monkeypatch):
@@ -243,7 +278,7 @@ def test_simulate_bundle_returns_false_for_rpc_exception(monkeypatch):
 
     monkeypatch.setattr(rescue, "_compute_fees", lambda w3, fee: (1, 20_000_000_000))
     monkeypatch.setattr(rescue, "_max_next_block_effective_fee", lambda w3, fee: 2)
-    monkeypatch.setattr(rescue, "_build_bundle", lambda *args: [])
+    monkeypatch.setattr(rescue, "prepare_bundle", lambda *args: _prepared_bundle())
     monkeypatch.setattr(rescue.ui, "section", lambda message: None)
     monkeypatch.setattr(rescue.ui, "info", lambda message: None)
     monkeypatch.setattr(rescue.ui, "error", errors.append)
@@ -278,6 +313,10 @@ def _receipts():
             transactionHash=SimpleNamespace(hex=lambda: "0xabc"),
         )
     ]
+
+
+def _not_found():
+    return TransactionNotFound("bundle transaction was not included")
 
 
 class FakeSendResult:
@@ -324,9 +363,9 @@ class FakeEthSend:
 
 
 class FakeWeb3Send:
-    def __init__(self, eth, flashbots=None):
+    def __init__(self, eth, relay=None):
         self.eth = eth
-        self.flashbots = flashbots
+        self.relay = relay
 
     def from_wei(self, value, unit):
         if unit == "gwei":
@@ -337,12 +376,16 @@ class FakeWeb3Send:
 
 
 def _patch_send(monkeypatch, max_fee=20_000_000_000, required=1000):
-    monkeypatch.setattr(rescue, "_compute_fees", lambda w3, fee: (1, max_fee))
-    monkeypatch.setattr(rescue, "_max_next_block_effective_fee", lambda w3, fee: 2)
     monkeypatch.setattr(
-        rescue, "_build_bundle", lambda *args: [{"signed_transaction": b"signed"}]
+        rescue,
+        "prepare_bundle",
+        lambda *args: _prepared_bundle(required_funding=required),
     )
-    monkeypatch.setattr(rescue, "_required_funding", lambda *args: required)
+    monkeypatch.setattr(
+        rescue,
+        "simulate_prepared_bundle",
+        lambda w3, bundle: SimulationOutcome(True, bundle=bundle),
+    )
     for name in ("section", "info", "success", "warning", "error"):
         monkeypatch.setattr(rescue.ui, name, lambda *a, **k: None)
     monkeypatch.setattr(rescue.ui.console, "status", lambda message: DummyStatus())
@@ -364,20 +407,20 @@ def test_send_with_retry_returns_true_when_included_first_attempt(monkeypatch):
 
 
 def test_send_with_retry_loops_until_included(monkeypatch):
-    fee_calls = []
+    prepare_calls = []
     _patch_send(monkeypatch)
     monkeypatch.setattr(
         rescue,
-        "_compute_fees",
-        lambda w3, fee: (fee_calls.append(1), (1, 20_000_000_000))[1],
+        "prepare_bundle",
+        lambda *args: (prepare_calls.append(1), _prepared_bundle())[1],
     )
     flashbots = FakeFlashbotsSender(
-        [TransactionNotFound(), TransactionNotFound(), _receipts()]
+        [_not_found(), _not_found(), _receipts()]
     )
 
     assert _run_send(monkeypatch, flashbots) is True
     assert len(flashbots.sent) == 3
-    assert len(fee_calls) == 3  # fees refreshed every attempt
+    assert len(prepare_calls) == 3  # fees and nonces refreshed every attempt
 
 
 def test_send_with_retry_stops_after_max_attempts_when_user_declines(monkeypatch):
@@ -386,7 +429,7 @@ def test_send_with_retry_stops_after_max_attempts_when_user_declines(monkeypatch
     monkeypatch.setattr(
         rescue, "prompt_yes_no", lambda *a, **k: confirms.append(1) or False
     )
-    flashbots = FakeFlashbotsSender([TransactionNotFound()] * rescue.MAX_BLOCK_ATTEMPTS)
+    flashbots = FakeFlashbotsSender([_not_found()] * rescue.MAX_BLOCK_ATTEMPTS)
 
     assert _run_send(monkeypatch, flashbots) is False
     assert len(flashbots.sent) == rescue.MAX_BLOCK_ATTEMPTS
@@ -400,7 +443,7 @@ def test_send_with_retry_keeps_trying_when_user_confirms(monkeypatch):
         rescue, "prompt_yes_no", lambda *a, **k: confirms.append(1) or True
     )
     flashbots = FakeFlashbotsSender(
-        [TransactionNotFound()] * rescue.MAX_BLOCK_ATTEMPTS + [_receipts()]
+        [_not_found()] * rescue.MAX_BLOCK_ATTEMPTS + [_receipts()]
     )
 
     assert _run_send(monkeypatch, flashbots) is True
@@ -413,7 +456,7 @@ def test_send_with_retry_refunds_when_balance_below_requirement(monkeypatch):
     refunds = []
     monkeypatch.setattr(rescue, "wait_for_funding", lambda *a: refunds.append(a[1:]))
     flashbots = FakeFlashbotsSender([_receipts()])
-    w3 = FakeWeb3Send(FakeEthSend(balance=[500]), flashbots)
+    w3 = FakeWeb3Send(FakeEthSend(balance=[500, 1500]), flashbots)
 
     assert (
         rescue.send_with_retry(

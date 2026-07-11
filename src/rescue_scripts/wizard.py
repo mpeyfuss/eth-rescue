@@ -148,7 +148,10 @@ def save_config(actions: list[RescueData]) -> None:
     ui.success(f"Saved plan to {path}")
 
 
-def build_rescue_data(victim_address: str = "") -> list[RescueData]:
+def build_rescue_data(
+    victim_address: str = "",
+    safe_wallet: str | None = None,
+) -> list[RescueData]:
     """
     Step 1 of the flow: produce the list of rescue actions, either by loading a
     saved JSON config or by walking the guided wizard. Wizard-built plans can be
@@ -167,7 +170,8 @@ def build_rescue_data(victim_address: str = "") -> list[RescueData]:
     victim_hint = victim_address or prompt_address(
         "Compromised (victim) wallet address"
     )
-    safe_wallet = prompt_address("Safe wallet to send everything to")
+    if safe_wallet is None:
+        safe_wallet = prompt_address("Safe wallet to send everything to")
 
     actions: list[RescueData] = []
     while True:

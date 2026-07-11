@@ -7,8 +7,8 @@ class RescueData(TypedDict):
     address: str
     function_signature: str
     args: list[Any]
-    gas_estimate: NotRequired[int]
-    description: NotRequired[str]
+    gas_estimate: int
+    description: str
 
 
 class Network(TypedDict):

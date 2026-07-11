@@ -1,8 +1,11 @@
 from typing import cast
 
+import rlp
 from eth_account.account import Account
 from eth_account.signers.local import LocalAccount
-from eth_utils import to_hex
+from eth_keys import keys
+from eth_utils import keccak, to_hex
+from hexbytes import HexBytes
 from web3 import HTTPProvider, Web3
 from web3.exceptions import TransactionNotFound
 
@@ -11,12 +14,12 @@ from rescue_scripts.calldata import build_calldata
 from rescue_scripts.flashbots import FlashbotsWeb3, flashbot
 from rescue_scripts.prompts import (
     pause,
+    prompt_address,
     prompt_float,
     prompt_secret,
     prompt_select,
     prompt_yes_no,
 )
-from rescue_scripts.templates import GAS_GENERIC
 from rescue_scripts.types import (
     BundleEntry,
     Network,
@@ -40,8 +43,13 @@ NETWORKS: dict[str, Network] = {
 }
 
 FUNDING_TX_GAS = 21000
+UNDELEGATE_TX_GAS = 60000
+SWEEP_TX_GAS = 21000
 FUNDING_BUFFER = 1.15  # extra headroom on the gas wallet for fee fluctuation
 MAX_BLOCK_ATTEMPTS = 25  # ~5 minutes of blocks before checking in with the user
+SET_CODE_TX_TYPE = 0x04
+SET_CODE_MAGIC = 0x05
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +106,11 @@ def load_accounts() -> tuple[LocalAccount, LocalAccount, LocalAccount]:
     """Collect the (victim, gas, auth) accounts. Auth is an ephemeral signer."""
     ui.section("Step 1: Set up accounts")
     victim = _setup_victim_account()
-    gas = _setup_gas_account()
+    while True:
+        gas = _setup_gas_account()
+        if gas.address.lower() != victim.address.lower():
+            break
+        ui.warning("Gas wallet must be different from the compromised wallet.")
     auth = Account.create()  # ephemeral Flashbots signing identity; needs no funds
     ui.render_accounts(victim.address, gas.address)
     return victim, gas, auth
@@ -134,6 +146,11 @@ def _compute_fees(w3: Web3, extra_priority_fee_gwei: float) -> tuple[int, int]:
     return priority_fee, max_fee_per_gas
 
 
+def _max_next_block_effective_fee(w3: Web3, priority_fee: int) -> int:
+    latest_base_fee = int(w3.eth.get_block("latest")["baseFeePerGas"])
+    return latest_base_fee + latest_base_fee // 8 + 1 + priority_fee
+
+
 def prepare_actions(
     w3: Web3, victim: str, rescue_data: list[RescueData]
 ) -> list[PreparedAction]:
@@ -143,9 +160,7 @@ def prepare_actions(
     prepared: list[PreparedAction] = []
     for data in rescue_data:
         tx_data = build_calldata(data["function_signature"], data["args"])
-        gas = _estimate_gas(
-            w3, victim, data["address"], tx_data, data.get("gas_estimate", GAS_GENERIC)
-        )
+        gas = _estimate_gas(w3, victim, data["address"], tx_data, data["gas_estimate"])
         prepared.append({"to": data["address"], "data": tx_data, "gas": gas})
     return prepared
 
@@ -162,10 +177,26 @@ def _estimate_gas(w3: Web3, victim: str, to: str, data: str, fallback: int) -> i
         return fallback
 
 
-def _required_funding(prepared: list[PreparedAction], max_fee_per_gas: int) -> int:
-    """Total ETH the gas wallet must hold: rescue gas + funding tx gas + buffer."""
+def _victim_funding_value(
+    prepared: list[PreparedAction],
+    max_fee_per_gas: int,
+    effective_fee_cap: int,
+) -> int:
     rescue_cost = sum(a["gas"] * max_fee_per_gas for a in prepared)
-    return int((rescue_cost + FUNDING_TX_GAS * max_fee_per_gas) * FUNDING_BUFFER)
+    return rescue_cost + SWEEP_TX_GAS * effective_fee_cap
+
+
+def _required_funding(
+    prepared: list[PreparedAction],
+    max_fee_per_gas: int,
+    effective_fee_cap: int | None = None,
+) -> int:
+    """Total ETH the gas wallet must hold for sponsor txs and victim funding."""
+    if effective_fee_cap is None:
+        effective_fee_cap = max_fee_per_gas
+    victim_funding = _victim_funding_value(prepared, max_fee_per_gas, effective_fee_cap)
+    sponsor_cost = (UNDELEGATE_TX_GAS + FUNDING_TX_GAS) * max_fee_per_gas
+    return int((victim_funding + sponsor_cost) * FUNDING_BUFFER)
 
 
 def preview(w3: Web3, prepared: list[PreparedAction], max_fee_per_gas: int) -> None:
@@ -202,25 +233,109 @@ def wait_for_funding(w3: Web3, gas_address: str, required: int) -> None:
 # ---------------------------------------------------------------------------
 # Step 5: simulate, build, sign, send (retry across blocks)
 # ---------------------------------------------------------------------------
+def _address_bytes(address: str) -> bytes:
+    return bytes(HexBytes(Web3.to_checksum_address(address)))
+
+
+def _sign_hash(private_key: bytes, message_hash: bytes) -> tuple[int, int, int]:
+    signature = keys.PrivateKey(bytes(private_key)).sign_msg_hash(message_hash)
+    return signature.v, signature.r, signature.s
+
+
+def _signed_raw_transaction(signed) -> HexBytes:
+    raw = getattr(signed, "rawTransaction", None)
+    if raw is None:
+        raw = signed.raw_transaction
+    return cast(HexBytes, raw)
+
+
+def _sign_7702_undelegation(
+    *,
+    chain_id: int,
+    tx_nonce: int,
+    authority_nonce: int,
+    authority_key: bytes,
+    sponsor_key: bytes,
+    sponsor_address: str,
+    priority_fee: int,
+    max_fee_per_gas: int,
+) -> HexBytes:
+    zero_address = _address_bytes(ZERO_ADDRESS)
+    auth_message = keccak(
+        bytes([SET_CODE_MAGIC]) + rlp.encode([chain_id, zero_address, authority_nonce])
+    )
+    auth_y_parity, auth_r, auth_s = _sign_hash(authority_key, auth_message)
+    authorization = [
+        chain_id,
+        zero_address,
+        authority_nonce,
+        auth_y_parity,
+        auth_r,
+        auth_s,
+    ]
+
+    unsigned_payload = [
+        chain_id,
+        tx_nonce,
+        priority_fee,
+        max_fee_per_gas,
+        UNDELEGATE_TX_GAS,
+        _address_bytes(sponsor_address),
+        0,
+        b"",
+        [],
+        [authorization],
+    ]
+    tx_message = keccak(bytes([SET_CODE_TX_TYPE]) + rlp.encode(unsigned_payload))
+    tx_y_parity, tx_r, tx_s = _sign_hash(sponsor_key, tx_message)
+    return HexBytes(
+        bytes([SET_CODE_TX_TYPE])
+        + rlp.encode(unsigned_payload + [tx_y_parity, tx_r, tx_s])
+    )
+
+
+def _safe_victim_balance(w3: Web3, address: str) -> int:
+    try:
+        return w3.eth.get_balance(address)
+    except Exception:
+        return 0
+
+
 def _build_bundle(
     w3: Web3,
     victim: LocalAccount,
     gas: LocalAccount,
     prepared: list[PreparedAction],
+    safe_address: str,
     priority_fee: int,
     max_fee_per_gas: int,
+    effective_fee_cap: int,
     victim_nonce: int,
     gas_nonce: int,
+    victim_balance: int,
 ) -> list[BundleEntry]:
     chain_id = w3.eth.chain_id
     rescue_cost = sum(a["gas"] * max_fee_per_gas for a in prepared)
+    rescue_fee_cap = sum(a["gas"] * effective_fee_cap for a in prepared)
+    sweep_value = max(0, victim_balance + rescue_cost - rescue_fee_cap)
+
+    undelegate_tx = _sign_7702_undelegation(
+        chain_id=chain_id,
+        tx_nonce=gas_nonce,
+        authority_nonce=victim_nonce,
+        authority_key=victim.key,
+        sponsor_key=gas.key,
+        sponsor_address=gas.address,
+        priority_fee=priority_fee,
+        max_fee_per_gas=max_fee_per_gas,
+    )
     funding_tx = {
         "to": victim.address,
-        "value": rescue_cost,
+        "value": _victim_funding_value(prepared, max_fee_per_gas, effective_fee_cap),
         "gas": FUNDING_TX_GAS,
         "maxFeePerGas": max_fee_per_gas,
         "maxPriorityFeePerGas": priority_fee,
-        "nonce": gas_nonce,
+        "nonce": gas_nonce + 1,
         "chainId": chain_id,
     }
     rescue_txs = [
@@ -230,16 +345,29 @@ def _build_bundle(
             "gas": a["gas"],
             "maxFeePerGas": max_fee_per_gas,
             "maxPriorityFeePerGas": priority_fee,
-            "nonce": victim_nonce + i,
+            "nonce": victim_nonce + 1 + i,
             "chainId": chain_id,
         }
         for i, a in enumerate(prepared)
     ]
+    sweep_tx = {
+        "to": safe_address,
+        "value": sweep_value,
+        "gas": SWEEP_TX_GAS,
+        "maxFeePerGas": effective_fee_cap,
+        "maxPriorityFeePerGas": priority_fee,
+        "nonce": victim_nonce + 1 + len(prepared),
+        "chainId": chain_id,
+    }
     signed = [w3.eth.account.sign_transaction(funding_tx, private_key=gas.key)]
     signed += [
         w3.eth.account.sign_transaction(tx, private_key=victim.key) for tx in rescue_txs
     ]
-    return [{"signed_transaction": s.rawTransaction} for s in signed]
+    if sweep_value:
+        signed.append(w3.eth.account.sign_transaction(sweep_tx, private_key=victim.key))
+    return [{"signed_transaction": undelegate_tx}] + [
+        {"signed_transaction": _signed_raw_transaction(s)} for s in signed
+    ]
 
 
 def _simulation_has_failures(result: SimulationResult) -> bool:
@@ -254,6 +382,7 @@ def simulate_bundle(
     victim: LocalAccount,
     gas: LocalAccount,
     prepared: list[PreparedAction],
+    safe_address: str,
     extra_priority_fee_gwei: float,
 ) -> bool:
     """Simulate the exact funding + rescue bundle before asking to send it."""
@@ -261,16 +390,20 @@ def simulate_bundle(
     victim_nonce = w3.eth.get_transaction_count(victim.address)
     gas_nonce = w3.eth.get_transaction_count(gas.address)
     priority_fee, max_fee_per_gas = _compute_fees(w3, extra_priority_fee_gwei)
+    effective_fee_cap = _max_next_block_effective_fee(w3, priority_fee)
     target_block = w3.eth.block_number + 1
     bundle = _build_bundle(
         w3,
         victim,
         gas,
         prepared,
+        safe_address,
         priority_fee,
         max_fee_per_gas,
+        effective_fee_cap,
         victim_nonce,
         gas_nonce,
+        _safe_victim_balance(w3, victim.address),
     )
 
     ui.info(
@@ -301,6 +434,7 @@ def send_with_retry(
     victim: LocalAccount,
     gas: LocalAccount,
     prepared: list[PreparedAction],
+    safe_address: str,
     extra_priority_fee_gwei: float,
 ) -> bool:
     """Resend the bundle each block (refreshing fees) until included or aborted."""
@@ -310,9 +444,10 @@ def send_with_retry(
     while True:
         for attempt in range(1, MAX_BLOCK_ATTEMPTS + 1):
             priority_fee, max_fee_per_gas = _compute_fees(w3, extra_priority_fee_gwei)
+            effective_fee_cap = _max_next_block_effective_fee(w3, priority_fee)
 
             # ensure the gas wallet can still cover the (possibly higher) fees
-            needed = _required_funding(prepared, max_fee_per_gas)
+            needed = _required_funding(prepared, max_fee_per_gas, effective_fee_cap)
             if w3.eth.get_balance(gas.address) < needed:
                 ui.warning("Gas wallet balance dropped below requirement (fees rose).")
                 wait_for_funding(w3, gas.address, needed)
@@ -322,10 +457,13 @@ def send_with_retry(
                 victim,
                 gas,
                 prepared,
+                safe_address,
                 priority_fee,
                 max_fee_per_gas,
+                effective_fee_cap,
                 victim_nonce,
                 gas_nonce,
+                _safe_victim_balance(w3, victim.address),
             )
             target_block = w3.eth.block_number + 1
             result = w3.flashbots.send_bundle(bundle, target_block_number=target_block)
@@ -367,13 +505,15 @@ def run() -> None:
 
     # Step 2: build or load the plan
     ui.section("Step 2: Build the rescue plan")
-    rescue_data = build_rescue_data(victim.address)
+    safe_wallet = prompt_address("Safe wallet to receive rescued assets and ETH")
+    rescue_data = build_rescue_data(victim.address, safe_wallet)
 
     # Step 3: estimate gas + preview cost
     extra_priority_fee = prompt_float("Extra priority fee to add (gwei)", default=0.0)
     with ui.console.status("Preparing actions and estimating gas..."):
         prepared = prepare_actions(w3, victim.address, rescue_data)
-        _, max_fee_per_gas = _compute_fees(w3, extra_priority_fee)
+        priority_fee, max_fee_per_gas = _compute_fees(w3, extra_priority_fee)
+        effective_fee_cap = _max_next_block_effective_fee(w3, priority_fee)
     preview(w3, prepared, max_fee_per_gas)
 
     if not prompt_yes_no("\nProceed to funding?", default=True):
@@ -381,10 +521,16 @@ def run() -> None:
         return
 
     # Step 4: fund the gas wallet (with refresh loop)
-    wait_for_funding(w3, gas.address, _required_funding(prepared, max_fee_per_gas))
+    wait_for_funding(
+        w3,
+        gas.address,
+        _required_funding(prepared, max_fee_per_gas, effective_fee_cap),
+    )
 
     # Step 5: simulate, confirm, and send (retry across blocks)
-    simulation_ok = simulate_bundle(w3, victim, gas, prepared, extra_priority_fee)
+    simulation_ok = simulate_bundle(
+        w3, victim, gas, prepared, safe_wallet, extra_priority_fee
+    )
     if not simulation_ok and not prompt_yes_no(
         "Simulation did not pass cleanly. Continue anyway?",
         default=False,
@@ -396,4 +542,4 @@ def run() -> None:
     if not prompt_yes_no("Send the rescue bundle now?", default=True):
         ui.warning("Aborted. Nothing was sent.")
         return
-    send_with_retry(w3, victim, gas, prepared, extra_priority_fee)
+    send_with_retry(w3, victim, gas, prepared, safe_wallet, extra_priority_fee)

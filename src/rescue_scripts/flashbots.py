@@ -21,7 +21,7 @@ BUILDERS = [
 ]
 
 
-class FlashbotsMP(Flashbots):
+class CustomFlashbots(Flashbots):
     def send_raw_bundle_munger(
         self,
         signed_bundled_transactions: list[HexBytes],
@@ -36,7 +36,7 @@ class FlashbotsMP(Flashbots):
 
 
 class FlashbotsWeb3(Web3):
-    flashbots: FlashbotsMP
+    flashbots: CustomFlashbots
 
 
 def flashbot(
@@ -49,6 +49,6 @@ def flashbot(
     w3.middleware_onion.add(flash_middleware)
 
     # attach modules to add the new namespace commands
-    attach_modules(w3, {"flashbots": (FlashbotsMP,)})
+    attach_modules(w3, {"flashbots": (CustomFlashbots,)})
 
     return cast(FlashbotsWeb3, w3)

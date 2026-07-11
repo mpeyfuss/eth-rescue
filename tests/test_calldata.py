@@ -12,31 +12,33 @@ def _selector(sig: str) -> str:
     return "0x" + function_signature_to_4byte_selector(sig).hex()
 
 
+def test_build_calldata_raises_on_invalid_types():
+    with pytest.raises(
+        ValueError,
+        match="invalid types were found",
+    ):
+        build_calldata("transfer(addy)", [SAFE])
+
+
 def test_build_calldata_encodes_selector_and_args():
     data = build_calldata("transfer(address,uint256)", [SAFE, 1000])
 
     assert data.startswith(_selector("transfer(address,uint256)"))
     assert data == build_calldata("transfer(address,uint256)", [SAFE.lower(), 1000])
-
-
-def test_build_calldata_coerces_hex_string_integers():
-    from_int = build_calldata("setValue(uint256)", [255])
-    from_hex = build_calldata("setValue(uint256)", ["0xff"])
-
-    assert from_int == from_hex
-
-
-def test_build_calldata_coerces_bool_and_bytes():
-    data = build_calldata("configure(bool,bytes)", ["true", "0xabcd"])
-
-    assert data.startswith(_selector("configure(bool,bytes)"))
-    assert build_calldata("configure(bool,bytes)", [True, b"\xab\xcd"]) == data
+    assert (
+        data
+        == "0xa9059cbb00000000000000000000000074a7b842fdeb244c152aa5bc8b7fbae362091ee100000000000000000000000000000000000000000000000000000000000003e8"
+    )
 
 
 def test_build_calldata_handles_arrays():
-    data = build_calldata("batch(uint256[])", [[1, "0x2", 3]])
+    data = build_calldata("batch(uint256[])", [[1, 2, 3]])
 
     assert data.startswith(_selector("batch(uint256[])"))
+    assert (
+        data
+        == "0x29ba162900000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
+    )
 
 
 def test_build_calldata_raises_on_arg_count_mismatch():

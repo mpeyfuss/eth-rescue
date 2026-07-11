@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import rlp
+from eth_account.account import Account
 from web3.exceptions import TransactionNotFound
 
 from rescue_scripts import rescue
@@ -80,7 +82,7 @@ def test_compute_fees_adds_extra_priority_fee():
     assert max_fee_per_gas == 28_750_000_000
 
 
-def test_build_bundle_sets_priority_fee_on_every_transaction():
+def test_build_bundle_sets_priority_fee_on_every_transaction(monkeypatch):
     account = FakeAccount()
     w3 = SimpleNamespace(
         eth=SimpleNamespace(
@@ -90,7 +92,11 @@ def test_build_bundle_sets_priority_fee_on_every_transaction():
     )
     priority_fee = 3_750_000_000
     max_fee_per_gas = 28_750_000_000
+    effective_fee_cap = 15_000_000_000
 
+    monkeypatch.setattr(
+        rescue, "_sign_7702_undelegation", lambda **kwargs: b"undelegate"
+    )
     bundle = rescue._build_bundle(
         w3,
         victim=FakeSigner("victim", "victim-key"),
@@ -99,23 +105,63 @@ def test_build_bundle_sets_priority_fee_on_every_transaction():
             {"to": "target-1", "data": "0x1234", "gas": 50_000},
             {"to": "target-2", "data": "0x5678", "gas": 70_000},
         ],
+        safe_address="safe",
         priority_fee=priority_fee,
         max_fee_per_gas=max_fee_per_gas,
+        effective_fee_cap=effective_fee_cap,
         victim_nonce=9,
         gas_nonce=2,
+        victim_balance=123,
     )
 
     assert bundle == [
+        {"signed_transaction": b"undelegate"},
         {"signed_transaction": "signed-1"},
         {"signed_transaction": "signed-2"},
         {"signed_transaction": "signed-3"},
+        {"signed_transaction": "signed-4"},
     ]
     txs = [tx for tx, _private_key in account.signed_txs]
-    assert [tx["maxPriorityFeePerGas"] for tx in txs] == [priority_fee] * 3
-    assert [tx["maxFeePerGas"] for tx in txs] == [max_fee_per_gas] * 3
+    assert [tx["maxPriorityFeePerGas"] for tx in txs] == [priority_fee] * 4
+    assert [tx["maxFeePerGas"] for tx in txs] == [
+        max_fee_per_gas,
+        max_fee_per_gas,
+        max_fee_per_gas,
+        effective_fee_cap,
+    ]
+    assert [tx["nonce"] for tx in txs] == [3, 10, 11, 12]
+    assert txs[0]["value"] == (
+        120_000 * max_fee_per_gas + rescue.SWEEP_TX_GAS * effective_fee_cap
+    )
+    assert txs[-1]["to"] == "safe"
+    assert txs[-1]["value"] == 123 + 120_000 * (max_fee_per_gas - effective_fee_cap)
     assert account.signed_txs[0][1] == "gas-key"
     assert account.signed_txs[1][1] == "victim-key"
     assert account.signed_txs[2][1] == "victim-key"
+    assert account.signed_txs[3][1] == "victim-key"
+
+
+def test_sign_7702_undelegation_builds_type_4_clear_authorization():
+    victim = Account.create()
+    gas = Account.create()
+
+    raw_tx = rescue._sign_7702_undelegation(
+        chain_id=1,
+        tx_nonce=3,
+        authority_nonce=9,
+        authority_key=victim.key,
+        sponsor_key=gas.key,
+        sponsor_address=gas.address,
+        priority_fee=1_000_000_000,
+        max_fee_per_gas=20_000_000_000,
+    )
+
+    assert raw_tx[0] == rescue.SET_CODE_TX_TYPE
+    decoded = rlp.decode(raw_tx[1:])
+    authorization = decoded[9][0]
+    assert authorization[0] == b"\x01"
+    assert authorization[1] == b"\x00" * 20
+    assert authorization[2] == b"\x09"
 
 
 def test_simulate_bundle_returns_true_for_clean_result(monkeypatch):
@@ -129,6 +175,7 @@ def test_simulate_bundle_returns_true_for_clean_result(monkeypatch):
     w3 = FakeWeb3(flashbots)
 
     monkeypatch.setattr(rescue, "_compute_fees", lambda w3, fee: (1, 20_000_000_000))
+    monkeypatch.setattr(rescue, "_max_next_block_effective_fee", lambda w3, fee: 2)
     monkeypatch.setattr(
         rescue,
         "_build_bundle",
@@ -149,6 +196,7 @@ def test_simulate_bundle_returns_true_for_clean_result(monkeypatch):
         SimpleNamespace(address="victim"),
         SimpleNamespace(address="gas"),
         [{"to": "target", "gas": 21_000}],
+        "safe",
         0.0,
     )
     assert flashbots.calls == [([{"signed_transaction": b"signed"}], 101)]
@@ -166,6 +214,7 @@ def test_simulate_bundle_returns_false_for_revert(monkeypatch):
     w3 = FakeWeb3(flashbots)
 
     monkeypatch.setattr(rescue, "_compute_fees", lambda w3, fee: (1, 20_000_000_000))
+    monkeypatch.setattr(rescue, "_max_next_block_effective_fee", lambda w3, fee: 2)
     monkeypatch.setattr(rescue, "_build_bundle", lambda *args: [])
     monkeypatch.setattr(rescue.ui, "section", lambda message: None)
     monkeypatch.setattr(rescue.ui, "info", lambda message: None)
@@ -182,6 +231,7 @@ def test_simulate_bundle_returns_false_for_revert(monkeypatch):
         SimpleNamespace(address="victim"),
         SimpleNamespace(address="gas"),
         [{"to": "target", "gas": 21_000}],
+        "safe",
         0.0,
     )
     assert errors == ["Simulation completed, but one or more transactions failed."]
@@ -192,6 +242,7 @@ def test_simulate_bundle_returns_false_for_rpc_exception(monkeypatch):
     w3 = FakeWeb3(FakeFlashbots(error=RuntimeError("relay unavailable")))
 
     monkeypatch.setattr(rescue, "_compute_fees", lambda w3, fee: (1, 20_000_000_000))
+    monkeypatch.setattr(rescue, "_max_next_block_effective_fee", lambda w3, fee: 2)
     monkeypatch.setattr(rescue, "_build_bundle", lambda *args: [])
     monkeypatch.setattr(rescue.ui, "section", lambda message: None)
     monkeypatch.setattr(rescue.ui, "info", lambda message: None)
@@ -207,6 +258,7 @@ def test_simulate_bundle_returns_false_for_rpc_exception(monkeypatch):
         SimpleNamespace(address="victim"),
         SimpleNamespace(address="gas"),
         [{"to": "target", "gas": 21_000}],
+        "safe",
         0.0,
     )
     assert errors == ["Bundle simulation failed: relay unavailable"]
@@ -286,10 +338,11 @@ class FakeWeb3Send:
 
 def _patch_send(monkeypatch, max_fee=20_000_000_000, required=1000):
     monkeypatch.setattr(rescue, "_compute_fees", lambda w3, fee: (1, max_fee))
+    monkeypatch.setattr(rescue, "_max_next_block_effective_fee", lambda w3, fee: 2)
     monkeypatch.setattr(
         rescue, "_build_bundle", lambda *args: [{"signed_transaction": b"signed"}]
     )
-    monkeypatch.setattr(rescue, "_required_funding", lambda prepared, mfpg: required)
+    monkeypatch.setattr(rescue, "_required_funding", lambda *args: required)
     for name in ("section", "info", "success", "warning", "error"):
         monkeypatch.setattr(rescue.ui, name, lambda *a, **k: None)
     monkeypatch.setattr(rescue.ui.console, "status", lambda message: DummyStatus())
@@ -297,7 +350,9 @@ def _patch_send(monkeypatch, max_fee=20_000_000_000, required=1000):
 
 def _run_send(monkeypatch, flashbots, balance=1_000_000):
     w3 = FakeWeb3Send(FakeEthSend(balance), flashbots)
-    return rescue.send_with_retry(w3, VICTIM, GAS, [{"to": "t", "gas": 21_000}], 0.0)
+    return rescue.send_with_retry(
+        w3, VICTIM, GAS, [{"to": "t", "gas": 21_000}], "safe", 0.0
+    )
 
 
 def test_send_with_retry_returns_true_when_included_first_attempt(monkeypatch):
@@ -361,7 +416,9 @@ def test_send_with_retry_refunds_when_balance_below_requirement(monkeypatch):
     w3 = FakeWeb3Send(FakeEthSend(balance=[500]), flashbots)
 
     assert (
-        rescue.send_with_retry(w3, VICTIM, GAS, [{"to": "t", "gas": 21_000}], 0.0)
+        rescue.send_with_retry(
+            w3, VICTIM, GAS, [{"to": "t", "gas": 21_000}], "safe", 0.0
+        )
         is True
     )
     assert refunds == [(GAS.address, 1000)]

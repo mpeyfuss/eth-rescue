@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.13"
 
 [options]
-exclude-newer = "2026-06-13T18:23:10.080998Z"
+exclude-newer = "2026-06-13T21:40:10.874413Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -729,6 +729,7 @@ dependencies = [
     { name = "flashbots" },
     { name = "questionary" },
     { name = "rich" },
+    { name = "rlp" },
     { name = "web3" },
 ]
 
@@ -745,6 +746,7 @@ requires-dist = [
     { name = "flashbots", specifier = ">=2.0.0" },
     { name = "questionary", specifier = ">=2.1.0" },
     { name = "rich", specifier = ">=14.0.0" },
+    { name = "rlp", specifier = ">=4.1.0" },
     { name = "web3", specifier = "==6.20.2" },
 ]
 

@@ -1,7 +1,6 @@
 from rescue_scripts.types import RescueData
 
 # Fallback gas estimates per action type (used when on-chain estimation fails).
-# Values mirror the historical examples in `examples/`.
 GAS_ERC20 = 70000
 GAS_ERC721 = 140000
 GAS_ERC1155 = 85000

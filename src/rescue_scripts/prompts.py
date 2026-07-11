@@ -49,7 +49,7 @@ def prompt_path(label: str, allow_cancel: bool = False) -> str:
     return value
 
 
-def pause(label: str = "Press Enter to continue...") -> None:
+def pause(label: str = "Press any key to continue...") -> None:
     questionary.press_any_key_to_continue(label).ask()
 
 

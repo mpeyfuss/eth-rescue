@@ -46,8 +46,9 @@ then set up the **gas wallet** that pays for the rescue: either enter an existin
 or have the tool **create a new wallet** for you (it shows the address + key to save). The
 Flashbots signing key is generated automatically.
 
-**Step 2 — Build the rescue plan.** Either load a previously saved plan, or use the guided
-wizard: enter the safe wallet to move everything to, then add one or more actions:
+**Step 2 — Build the rescue plan.** Enter the safe wallet to receive rescued assets and
+leftover ETH. Then either load a previously saved plan, or use the guided wizard to add one
+or more actions:
 
 - **ERC721 NFT** — move an NFT (contract + token id)
 - **ERC1155 NFT** — move semi-fungible tokens (contract + token id + amount)
@@ -61,14 +62,17 @@ to `configs/` so you can reuse it next time (saved plans are git-ignored).
 **Step 3 — Plan & cost preview.** The tool connects to the network, auto-estimates gas for
 each action (with sensible fallbacks), and shows the estimated total cost.
 
-**Step 4 — Fund the gas wallet.** The **gas wallet pays for the entire rescue**. The tool
-tells you exactly how much ETH to send (including a safety buffer) and to which address, then
-waits — send the funds and press Enter to re-check the balance until it's funded.
+**Step 4 — Fund the gas wallet.** The **gas wallet pays for the entire rescue**, including
+the EIP-7702 undelegation transaction, the victim funding transaction, and the rescue bundle.
+The tool tells you exactly how much ETH to send (including a safety buffer) and to which
+address, then waits — send the funds and press Enter to re-check the balance until it's
+funded.
 
-**Step 5 — Send.** After a final confirmation, the bundle (fund victim → run all rescue
-actions, atomically) is submitted to Flashbots and **re-sent every block** until it lands,
-refreshing the gas price each attempt. If it isn't included after a stretch of blocks, you're
-asked whether to keep trying.
+**Step 5 — Send.** After a final confirmation, the bundle (EIP-7702 undelegate victim →
+fund victim → run all rescue actions → sweep guaranteed remaining ETH to the safe wallet,
+atomically) is submitted to Flashbots and **re-sent every block** until it lands, refreshing
+the gas price each attempt. If it isn't included after a stretch of blocks, you're asked
+whether to keep trying.
 
 ## Advanced: JSON config
 Power users can drive everything from a JSON file. Choose **Load a saved JSON config file** in

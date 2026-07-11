@@ -51,8 +51,8 @@ UNDELEGATE_TX_GAS = 60000
 SWEEP_TX_GAS = 21000
 FUNDING_BUFFER = 1.15  # extra headroom on the gas wallet for fee fluctuation
 MAX_BLOCK_ATTEMPTS = 25  # ~5 minutes of blocks before checking in with the user
-TARGET_BLOCK_OFFSET = 2
-BUNDLE_BLOCK_RANGE = 5
+TARGET_BLOCK_OFFSET = 1
+BUNDLE_BLOCK_RANGE = 5  # target current +1 through current +5 (relay maximum)
 SET_CODE_TX_TYPE = 0x04
 DELEGATION_DESIGNATOR_PREFIX = b"\xef\x01\x00"
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
@@ -404,7 +404,7 @@ def prepare_bundle(
     safe_address: str,
     extra_priority_fee_gwei: float,
 ) -> PreparedBundle:
-    """Build one immutable bundle two blocks ahead from current chain state."""
+    """Build one immutable bundle for the next block from current chain state."""
     victim_nonce = w3.eth.get_transaction_count(victim.address)
     gas_nonce = w3.eth.get_transaction_count(gas.address)
     priority_fee, max_fee_per_gas = _compute_fees(w3, extra_priority_fee_gwei)
@@ -553,9 +553,13 @@ def send_with_retry(
     safe_address: str,
     extra_priority_fee_gwei: float,
 ) -> bool:
-    """Build and simulate once per five-block submission window."""
+    """Build and simulate once per multi-block submission window."""
     while True:
         for batch_start in range(1, MAX_BLOCK_ATTEMPTS + 1, BUNDLE_BLOCK_RANGE):
+            batch_size = min(
+                BUNDLE_BLOCK_RANGE, MAX_BLOCK_ATTEMPTS - batch_start + 1
+            )
+            batch_end = batch_start + batch_size - 1
             try:
                 bundle = prepare_bundle(
                     w3,
@@ -590,22 +594,29 @@ def send_with_retry(
                 continue
 
             ui.info(
-                f"Attempts {batch_start}-{batch_start + BUNDLE_BLOCK_RANGE - 1}/"
+                f"Attempts {batch_start}-{batch_end}/"
                 f"{MAX_BLOCK_ATTEMPTS} -> blocks {bundle.target_block}-"
-                f"{bundle.target_block + BUNDLE_BLOCK_RANGE - 1} "
+                f"{bundle.target_block + batch_size - 1} "
                 f"@ {w3.from_wei(bundle.max_fee_per_gas, 'gwei')} gwei ..."
             )
-            try:
-                submissions = [
-                    w3.relay.send_bundle(
-                        bundle.entries,
-                        target_block_number=bundle.target_block + block_offset,
+            submissions = []
+            for block_offset in range(batch_size):
+                try:
+                    submissions.append(
+                        w3.relay.send_bundle(
+                            bundle.entries,
+                            target_block_number=bundle.target_block + block_offset,
+                        )
                     )
-                    for block_offset in range(BUNDLE_BLOCK_RANGE)
-                ]
-            except Exception as e:
-                ui.error(f"Relay submission failed: {e}")
-                return False
+                except Exception as e:
+                    if not submissions:
+                        ui.error(f"Relay submission failed: {e}")
+                        return False
+                    ui.warning(
+                        f"A later target was rejected ({e}); monitoring the "
+                        f"{len(submissions)} accepted submission(s)."
+                    )
+                    break
 
             for result in submissions:
                 try:

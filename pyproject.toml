@@ -1,7 +1,7 @@
 [project]
 name = "eth-rescue"
-version = "0.1.0"
-description = "Whitehat rescue scripts."
+version = "0.1.1"
+description = "An interactive Ethereum CLI for recovering assets and contract control from an account whose private key or seed phrase has been compromised."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

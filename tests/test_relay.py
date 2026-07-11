@@ -7,7 +7,7 @@ from eth_account import Account, messages
 from hexbytes import HexBytes
 from web3 import Web3
 
-from rescue_scripts.relay import RelayClient, RelayError, RelayRPCError
+from eth_rescue.relay import RelayClient, RelayError, RelayRPCError
 
 
 class Response:
@@ -37,7 +37,7 @@ def test_send_bundle_signs_exact_json_rpc_body(monkeypatch):
     requests = []
     response = {"jsonrpc": "2.0", "id": 1, "result": {"bundleHash": "0xabc"}}
     monkeypatch.setattr(
-        "rescue_scripts.relay.requests.post",
+        "eth_rescue.relay.requests.post",
         lambda url, **kwargs: requests.append((url, kwargs)) or Response(response),
     )
     w3 = SimpleNamespace(keccak=lambda value: HexBytes(b"\x11" * 32))
@@ -143,7 +143,7 @@ def test_request_wraps_transport_and_invalid_json_errors(monkeypatch):
     def raise_transport(*args, **kwargs):
         raise requests.ConnectionError("offline")
 
-    monkeypatch.setattr("rescue_scripts.relay.requests.post", raise_transport)
+    monkeypatch.setattr("eth_rescue.relay.requests.post", raise_transport)
     with pytest.raises(RelayError, match="offline"):
         client._request("eth_test", [{}])
 
@@ -152,7 +152,7 @@ def test_request_wraps_transport_and_invalid_json_errors(monkeypatch):
             raise ValueError("invalid json")
 
     monkeypatch.setattr(
-        "rescue_scripts.relay.requests.post",
+        "eth_rescue.relay.requests.post",
         lambda *args, **kwargs: InvalidJSONResponse({}),
     )
     with pytest.raises(RelayError, match="invalid json"):
@@ -167,7 +167,7 @@ def test_request_includes_sanitized_http_error_response(monkeypatch):
     response._content = b"  request  blocked\nby policy  "
 
     monkeypatch.setattr(
-        "rescue_scripts.relay.requests.post", lambda *args, **kwargs: response
+        "eth_rescue.relay.requests.post", lambda *args, **kwargs: response
     )
 
     with pytest.raises(
@@ -179,7 +179,7 @@ def test_request_includes_sanitized_http_error_response(monkeypatch):
 def test_request_raises_typed_rpc_error(monkeypatch):
     client = _client()
     monkeypatch.setattr(
-        "rescue_scripts.relay.requests.post",
+        "eth_rescue.relay.requests.post",
         lambda *args, **kwargs: Response(
             {
                 "jsonrpc": "2.0",
@@ -198,7 +198,7 @@ def test_request_raises_typed_rpc_error(monkeypatch):
 def test_request_rejects_response_without_result(monkeypatch):
     client = _client()
     monkeypatch.setattr(
-        "rescue_scripts.relay.requests.post",
+        "eth_rescue.relay.requests.post",
         lambda *args, **kwargs: Response({"jsonrpc": "2.0", "id": 1}),
     )
 

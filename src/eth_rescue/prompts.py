@@ -3,7 +3,7 @@ from typing import Any
 from eth_utils import is_address, to_checksum_address
 import questionary
 
-from rescue_scripts import ui
+from eth_rescue import ui
 
 CANCEL_WORDS = {"back", "cancel", "exit"}
 

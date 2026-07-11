@@ -2,7 +2,7 @@ import pytest
 from eth_account import Account
 from web3 import Web3
 
-from rescue_scripts.rescue import _sign_7702_undelegation
+from eth_rescue.rescue import _sign_7702_undelegation
 
 
 @pytest.mark.integration

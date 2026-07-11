@@ -1,139 +1,178 @@
-# Whitehat Rescue Scripts
-A compilation of whitehat rescue scripts for Ethereum.
+# Ethereum Rescue
 
-## Background
-When a private key or seedphrase is compromised, bad actors typically attach a sweeper bot to the account. So whenever any ETH is sent to the compromised wallet, the sweeper bot takes those funds before you can use the ETH for gas on any transactions to save NFTs, contract ownership, or any other onchain action.
+`eth-rescue` is an interactive Ethereum CLI for recovering assets and contract control from an account whose private key or seed phrase has been compromised.
 
-These scripts use private Flashbots bundles so the ordered rescue transactions are considered
-together by participating builders. A clean relay simulation is required before submission, but
-no rescue can eliminate every risk from an actively contested private key.
+When a compromised account is watched by a sweeper, sending it ETH for gas can give the attacker an opportunity to take the funds first. This tool instead sends an ordered private Flashbots bundle that can clear an EIP-7702 delegation when necessary, fund the compromised account, execute one or more rescue actions, and sweep a conservative amount of ETH to a safe wallet.
 
-## Getting Started
-1. Make sure you have [uv](https://docs.astral.sh/uv/) installed
-2. Run the rescue:
-   - From a clone: `uv sync` then `uv run eth-rescue`
-   - As an installed tool: see below
+> [!WARNING]
+> A clean relay simulation is required before submission, but it does not guarantee inclusion or recovery. An attacker with the same private key can change the nonce or move assets first, builders may decline the bundle, and private submission cannot make a contested account trustworthy. Rehearse on Sepolia with disposable accounts before attempting a mainnet rescue.
 
-The tool asks for everything it needs as you go — **no keystore files and no `.env`**. Private
-keys are only ever entered interactively (hidden input) and kept in memory; they are never read
-from or written to disk. You can also have it **generate a brand new gas wallet** for you. No
-Foundry required either — calldata is encoded in pure Python.
+> [!CAUTION]
+> This is experimental software provided “as is,” without warranty of any kind. Use it entirely at your own risk. To the fullest extent permitted by law, the authors, maintainers, and contributors are not liable for lost funds or assets, failed or partial rescues, transaction fees, compromised credentials, or any other damages arising from its use. See the [MIT License](LICENSE) for the governing terms.
 
-The Flashbots signing key is always generated automatically — you never provide it.
+## User guide
 
-## Install as a uv tool
-The project exposes a `eth-rescue` command, so it can be installed and run anywhere with
-[uv](https://docs.astral.sh/uv/):
+### Requirements
+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/). `uv` will obtain a compatible Python version when needed.
+- Access to the public RPC and Flashbots relay endpoints configured by the tool
+
+Foundry is not required to run a rescue. The CLI encodes calldata in Python. Foundry and Anvil are only required for the local integration tests.
+
+### Install and run
+
+First, [install uv](https://docs.astral.sh/uv/getting-started/installation/) for your operating system. Then choose either a one-time run or a persistent installation; cloning the repository is not required.
+
+Run the latest version directly in an isolated environment:
 
 ```sh
-# Run once without installing (from a clone)
-uvx --from . eth-rescue
+uvx eth-rescue
+```
 
-# Install the command globally, then run it from any folder
+Or install it as a persistent command:
+
+```sh
 uv tool install eth-rescue
 eth-rescue
 ```
 
-The tool writes saved plans relative to the directory you run it from — so run `eth-rescue`
-from your working folder.
+If `uv` reports that its tool directory is not on `PATH`, run `uv tool update-shell`, restart your shell, and then run `eth-rescue`.
 
-## How the wizard works
-`eth-rescue` walks you through the whole rescue, step by step:
+### Before you start
 
-**Pick a network.** Choose Ethereum mainnet, or **Sepolia** to rehearse the whole flow on a
-testnet first (it just swaps the RPC and Flashbots relay URLs — everything else is identical).
+Prepare three distinct account roles:
 
-**Step 1 — Set up accounts.** Enter the **compromised wallet's private key** (hidden input),
-then set up the **gas wallet** that pays for the rescue: either enter an existing private key
-or have the tool **create a new wallet** for you (it shows the address + key to save). The
-Flashbots signing key is generated automatically.
+- **Compromised wallet:** holds the assets or authority being rescued. You must have its private key.
+- **Gas wallet:** pays for the optional undelegation, victim funding, and rescue transactions. Enter an existing private key or let the CLI create a new wallet.
+- **Safe wallet:** receives rescued assets and the ETH sweep. It must differ from both the compromised and gas wallets.
 
-**Step 2 — Build the rescue plan.** Enter the safe wallet to receive rescued assets and
-leftover ETH. Then either load a previously saved plan, or use the guided wizard to add one
-or more actions:
+The Flashbots signing identity is generated automatically and needs no funds. Compromised and gas-wallet private keys are entered through hidden interactive prompts and held in memory; the tool does not read keys from keystores or `.env` files and does not write them to disk.
 
-- **ERC721 NFT** — move an NFT (contract + token id)
-- **Transient Auction House ERC721** — delist an escrowed NFT, then move it to safety
-- **ERC1155 NFT** — move semi-fungible tokens (contract + token id + amount)
-- **ERC20 token** — move tokens (contract + amount in base units / wei)
-- **Contract ownership** — `transferOwnership` of a contract you control
-- **Custom (advanced)** — any function signature + JSON args
+If the CLI generates a gas wallet, it displays the private key once. Save it securely before continuing and retain it until any unused gas-wallet balance has been recovered. The CLI does not include private keys in JSON plans; `configs/` and `.env` are git-ignored.
 
-You can add multiple actions to one bundle, and at the end you're offered to **save the plan**
-to `configs/` so you can reuse it next time (saved plans are git-ignored).
+### Supported networks
 
-**Step 3 — Plan & cost preview.** The tool verifies the RPC chain, auto-estimates gas for
-each action (with conservative fallbacks), and shows the estimated total cost.
+- Ethereum mainnet
+- Sepolia testnet
 
-**Step 4 — Fund the gas wallet.** The **gas wallet pays for the entire rescue**, including
-the EIP-7702 undelegation transaction, the victim funding transaction, and the rescue bundle.
-The tool tells you exactly how much ETH to send (including a safety buffer) and to which
-address, then waits — send the funds and press Enter to re-check the balance until it's
-funded.
+The selection controls the expected chain ID, public RPC endpoint, Flashbots relay, and builder routing. The CLI refuses to continue when the connected RPC reports the wrong chain.
 
-**Step 5 — Simulate and send.** The bundle is EIP-7702 undelegate victim → fund victim →
-run all rescue actions → sweep a conservative guaranteed amount of ETH to the safe wallet.
-The exact signed bundle must simulate cleanly before it is submitted. A fresh bundle is built
-and simulated for every target block, refreshing fees, balances, and both account nonces. If a
-simulation fails, the wizard identifies the failing action and lets you edit the plan, change
-the fee, retry with fresh chain state, or cancel without broadcasting.
+### Rescue workflow
 
-Gas funding is deliberately conservative. When an action uses less than its gas limit, the
-unused-gas savings can remain in the compromised wallet after the guaranteed sweep. Treat any
-such remainder as still at risk.
+1. **Choose the network.** Use Sepolia for a rehearsal or Ethereum mainnet for the live rescue.
+2. **Set up accounts.** Enter the compromised-wallet key, then enter or generate the separate gas wallet. Enter the safe-wallet address.
+3. **Build the plan.** Load a user-authored JSON plan or add one or more ordered actions with the guided wizard. Wizard-built plans can be reviewed before continuing.
+4. **Preview fees and funding.** Enter an optional extra priority fee. The CLI estimates each action with a 25% gas buffer, uses a conservative action-specific fallback if estimation fails, verifies whether the victim has an EIP-7702 delegation, and shows the maximum estimated cost.
+5. **Fund the gas wallet.** The CLI shows the required balance, including a safety buffer, and waits for you to fund the gas wallet. It rechecks only when you press a key.
+6. **Simulate.** A bundle is built from fresh fees, balances, and both account nonces for the next block. The exact signed transactions must simulate successfully through the relay before submission is offered.
+7. **Submit and monitor.** After explicit confirmation, the CLI submits the bundle for the relay's allowed block range. Each new attempt rebuilds and simulates with current chain state. After 25 missed blocks, it asks whether to keep trying.
 
-Flashbots cannot guarantee inclusion, and an attacker controlling the same key can change the
-victim nonce or move assets before a bundle lands. Repeated simulation and nonce refresh reduce
-stale-bundle risk but do not turn a contested account into a trusted one.
+When the compromised account has an EIP-7702 delegation, the first bundle transaction is a gas-wallet-sponsored type-4 transaction that authorizes the victim to clear its delegation. Plain externally owned accounts skip that transaction. Unexpected contract code on the victim is rejected rather than overwritten.
 
-## Advanced: JSON config
-Power users can drive everything from a JSON file. Choose **Load a saved JSON config file** in
-step 1 and point it at a config shaped like the files in `examples/` (`address`,
-`function_signature`, `args`, and an optional `gas_estimate`).
+The remaining order is gas wallet funds victim, victim executes every rescue action, then victim sweeps a conservative guaranteed amount of ETH to the safe wallet. The sweep is omitted when its value would be zero. Unused-gas savings can remain in the compromised wallet, so treat any residual balance as at risk.
 
-## Sepolia rehearsal checklist
+If simulation fails, the CLI identifies a failing rescue action when possible. You can remove or rebuild actions, change the extra priority fee, retry against fresh state, or cancel. No bundle is broadcast without a clean simulation and a separate send confirmation. A bundle that was already submitted may still be considered by its target builders even if a later retry or interaction is cancelled.
 
-Before using mainnet, rehearse with disposable Sepolia accounts:
+### Supported actions
+
+The guided wizard can add multiple actions in execution order:
+
+- **ERC-20:** calls `transfer(address,uint256)`; amounts are integer base units, not display units.
+- **ERC-721:** calls `transferFrom(address,address,uint256)` from the compromised wallet.
+- **ERC-1155:** calls `safeTransferFrom(address,address,uint256,uint256,bytes)`.
+- **Contract ownership:** calls `transferOwnership(address)`.
+- **Transient Auction House ERC-721:** looks up `ownerOf(tokenId)`, requires the owner to be the auction-house address recognized by this version of the tool, then orders `delist(address,uint256)` before the ERC-721 transfer.
+- **Custom:** accepts a target address, canonical function signature, and JSON array of ABI-compatible arguments.
+
+Entering `cancel`, `back`, or `exit` at a cancel-aware action prompt abandons that action and returns to plan construction.
+
+### JSON plans
+
+Advanced users can choose **Load a saved JSON config file** to supply a user-authored, ordered, non-empty JSON array. Each action has this shape:
+
+```json
+{
+  "address": "0xTargetContractAddress",
+  "function_signature": "transfer(address,uint256)",
+  "args": ["0xSafeWalletAddress", 1000000000000000000],
+  "gas_estimate": 70000
+}
+```
+
+| Field | Requirement |
+| --- | --- |
+| `address` | Required valid Ethereum contract address. It is converted to checksum form when loaded. |
+| `function_signature` | Required string containing `(` and ending in `)`, such as `transfer(address,uint256)`. |
+| `args` | Required JSON array in the same order as the function parameters. Token amounts must be integer base units. |
+| `gas_estimate` | Optional positive integer used only as the fallback when RPC estimation fails. Defaults to the generic fallback. |
+
+The loader rejects an empty plan, malformed JSON, missing required fields, invalid addresses or signatures, non-array arguments, and invalid fallback gas values. ABI encoding errors such as an argument-count or type mismatch are reported while preparing the plan.
+
+Example plans:
+
+- [ERC-20](examples/erc-20.json)
+- [ERC-721](examples/erc_721.json)
+- [ERC-1155](examples/erc_1155.json)
+- [CryptoPunk custom call](examples/cryptopunk.json)
+- [Contract ownership](examples/contract_ownership.json)
+
+The examples contain placeholder addresses and amounts; review and replace every value before use.
+
+### Sepolia rehearsal checklist
+
+Use disposable accounts and test assets:
 
 1. Fund a victim with test ETH and a test asset, then configure an unrelated gas wallet and safe wallet.
-2. Run one successful transfer and confirm the undelegation, funding, rescue, and sweep order in the receipts.
+2. Complete a transfer and confirm the receipt order: optional undelegation, funding, rescue actions, then sweep.
 3. Force an action revert and confirm submission remains blocked until the action is edited or removed.
 4. Change the victim nonce between attempts and confirm the next bundle is rebuilt and simulated with the new nonce.
-5. Confirm cancellation after a failed simulation broadcasts nothing.
+5. Cancel after a failed simulation and confirm nothing was submitted.
 
-## Local integration tests
+A successful rehearsal checks current endpoint compatibility and operating procedure; it cannot guarantee mainnet inclusion or prevent a nonce race.
 
-Run the fast unit suite with:
+## Developer guide
 
-```sh
-make test-unit
-```
+### Clone and set up
 
-The unit suite covers calldata construction, templates and wizard validation, fee and funding
-calculations, gas-estimation fallbacks, bundle construction, relay request/response handling,
-simulation failures, receipt validation, refreshed retries, and interactive boundaries.
-
-The integration suite
-starts an isolated Anvil node using the Osaka execution fork, which is the current Ethereum
-mainnet EVM fork after Fusaka. It compiles minimal fixture contracts and exercises the real
-rescue preparation, simulation, signing, funding, asset transfer, undelegation, and ETH sweep
-paths for ERC-20, ERC-721, ERC-1155, ownership, and auction delisting:
+Contributors should work from a clone:
 
 ```sh
-make test-integration
+git clone https://github.com/mpeyfuss/eth-rescue.git
+cd eth-rescue
+uv sync
+uv run eth-rescue
 ```
 
-Each integration test starts a fresh local Anvil process. Override `ANVIL_HARDFORK` only when
-intentionally testing another execution fork.
+The project requires Python 3.13 or newer. `uv sync` creates the project environment and installs the locked runtime and development dependencies.
 
-The local relay double snapshots Anvil for simulation and broadcasts signed transactions one at
-a time for execution. This verifies transaction contents, ordering, state changes, and rollback,
-but it does not model Flashbots privacy, builder selection, same-block execution, or atomic bundle
-inclusion.
+### Repository layout
 
-Those limitations matter: sequential Anvil execution mines transactions in separate blocks, so it
-cannot reproduce a builder's exact base-fee environment, bundle competition, or all-or-nothing
-inclusion behavior. Local tests also do not contact the public RPC or relay endpoints. Before a
-mainnet rescue, use the Sepolia rehearsal checklist with disposable accounts to validate current
-relay compatibility and operational behavior. Even a successful rehearsal cannot guarantee
-mainnet inclusion or prevent an attacker who controls the victim key from winning a nonce race.
+The main package is under `src/eth_rescue/`. Fast tests live directly under `tests/`; Anvil-backed tests and their Solidity fixtures live under `tests/integration/`. Example rescue plans live under `examples/`.
+
+### Development commands
+
+Common commands:
+
+```sh
+make fmt               # format Python with Ruff
+make lint              # run Ruff lint with automatic fixes
+make test-unit         # unit tests; this is also the default `make test`
+make test-integration  # compile fixtures and run Anvil-backed tests
+make test-all          # run unit and enabled integration tests
+```
+
+### Integration tests
+
+The integration suite requires `forge` and `anvil` from [Foundry](https://book.getfoundry.sh/getting-started/installation). `make test-integration` compiles the fixture contracts, sets `RUN_ANVIL_INTEGRATION=1`, and starts a fresh Anvil process for each test. It defaults to the Osaka execution fork; override it only when intentionally checking another fork:
+
+```sh
+ANVIL_HARDFORK=<fork-name> make test-integration
+```
+
+The integration tests exercise EIP-7702 undelegation, funding, ERC-20/721/1155 transfers, ownership transfer, auction delisting, ETH sweeping, simulation rollback, signing, and transaction ordering. Their local relay double snapshots Anvil for simulation and broadcasts transactions sequentially for execution.
+
+That double does **not** model Flashbots privacy, builder selection, same-block execution, bundle competition, exact builder base fees, or atomic all-or-nothing inclusion. The local suite does not contact the configured public RPC or relay endpoints.
+
+## License
+
+This project is available under the [MIT License](LICENSE).

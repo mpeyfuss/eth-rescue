@@ -1,8 +1,8 @@
 import pytest
 from eth_utils import function_signature_to_4byte_selector
 
-from rescue_scripts import calldata
-from rescue_scripts.calldata import build_calldata
+from eth_rescue import calldata
+from eth_rescue.calldata import build_calldata
 
 SAFE = "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1"
 VICTIM = "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61"

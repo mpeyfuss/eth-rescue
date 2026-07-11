@@ -5,10 +5,10 @@ from hexbytes import HexBytes
 from web3 import HTTPProvider, Web3
 from web3.exceptions import TransactionNotFound
 
-from rescue_scripts import ui
-from rescue_scripts.calldata import build_calldata
-from rescue_scripts.relay import BUILDERS, RelayClient, RelayWeb3
-from rescue_scripts.prompts import (
+from eth_rescue import ui
+from eth_rescue.calldata import build_calldata
+from eth_rescue.relay import BUILDERS, RelayClient, RelayWeb3
+from eth_rescue.prompts import (
     pause,
     prompt_address,
     prompt_float,
@@ -16,7 +16,7 @@ from rescue_scripts.prompts import (
     prompt_select,
     prompt_yes_no,
 )
-from rescue_scripts.types import (
+from eth_rescue.types import (
     BundleEntry,
     BundleTransaction,
     Network,
@@ -26,8 +26,8 @@ from rescue_scripts.types import (
     SimulationFailure,
     SimulationOutcome,
 )
-from rescue_scripts.templates import GAS_GENERIC
-from rescue_scripts.wizard import build_rescue_data, revise_rescue_data
+from eth_rescue.templates import GAS_GENERIC
+from eth_rescue.wizard import build_rescue_data, revise_rescue_data
 
 NETWORKS: dict[str, Network] = {
     "mainnet": {

@@ -1,4 +1,4 @@
-from rescue_scripts.types import RescueData
+from eth_rescue.types import RescueData
 
 # Fallback gas estimates per action type (used when on-chain estimation fails).
 GAS_ERC20 = 70000

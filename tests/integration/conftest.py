@@ -15,7 +15,7 @@ from eth_account.signers.local import LocalAccount
 from web3 import HTTPProvider, Web3
 from web3.types import TxReceipt
 
-from rescue_scripts.types import BundleEntry, SimulationResult
+from eth_rescue.types import BundleEntry, SimulationResult
 
 ANVIL_HARDFORK = os.environ.get("ANVIL_HARDFORK", "osaka")
 CONTRACT_OUT = Path(__file__).parent / "contracts" / "out" / "Fixtures.sol"

@@ -10,7 +10,7 @@ from hexbytes import HexBytes
 from web3 import Web3
 from web3.types import TxReceipt
 
-from rescue_scripts.types import (
+from eth_rescue.types import (
     BundleEntry,
     CallBundleResult,
     SendBundleResult,

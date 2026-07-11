@@ -7,8 +7,8 @@ from hexbytes import HexBytes
 from web3 import Web3
 from web3.exceptions import TransactionNotFound
 
-from rescue_scripts import rescue
-from rescue_scripts.types import (
+from eth_rescue import rescue
+from eth_rescue.types import (
     BundleTransaction,
     PreparedBundle,
     SimulationOutcome,

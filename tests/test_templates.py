@@ -1,4 +1,4 @@
-from rescue_scripts import templates
+from eth_rescue import templates
 
 
 AUCTION_HOUSE = "0x1111111111111111111111111111111111111111"

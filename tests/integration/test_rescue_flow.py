@@ -2,7 +2,7 @@ import pytest
 from eth_account import Account
 from web3 import Web3
 
-from rescue_scripts import rescue, templates
+from eth_rescue import rescue, templates
 
 pytestmark = pytest.mark.integration
 

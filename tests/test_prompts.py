@@ -1,6 +1,6 @@
 import pytest
 
-from rescue_scripts import prompts
+from eth_rescue import prompts
 
 
 class DummyPrompt:

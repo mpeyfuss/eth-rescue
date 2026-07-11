@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from rescue_scripts import wizard
+from eth_rescue import wizard
 
 SAFE = "0x1111111111111111111111111111111111111111"
 VICTIM = "0x2222222222222222222222222222222222222222"
@@ -277,7 +277,6 @@ def test_build_rescue_data_returns_to_menu_after_cancel(monkeypatch):
         wizard, "_build_actions", lambda w3, safe, victim: actions.pop(0)
     )
     monkeypatch.setattr(wizard, "print_plan", lambda actions: None)
-    monkeypatch.setattr(wizard, "save_config", lambda actions: None)
 
     assert wizard.build_rescue_data(None, VICTIM) == [
         {

@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from rescue_scripts.types import PreparedAction, RescueData, SimulationResult
+from eth_rescue.types import PreparedAction, RescueData, SimulationResult
 
 console = Console()
 

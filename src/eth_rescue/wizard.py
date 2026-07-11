@@ -1,26 +1,21 @@
 import json
-import os
-from datetime import datetime
 
 from eth_utils import is_address, to_checksum_address
 from web3 import Web3
 
-from rescue_scripts import templates
-from rescue_scripts import ui
-from rescue_scripts.abi import ERC721_OWNER_OF_ABI
-from rescue_scripts.prompts import (
+from eth_rescue import templates
+from eth_rescue import ui
+from eth_rescue.abi import ERC721_OWNER_OF_ABI
+from eth_rescue.prompts import (
     PromptCancelled,
     prompt_address,
     prompt_int,
     prompt_path,
     prompt_select,
     prompt_text,
-    prompt_yes_no,
 )
-from rescue_scripts.templates import GAS_GENERIC
-from rescue_scripts.types import RescueData
-
-CONFIG_DIR = "configs"
+from eth_rescue.templates import GAS_GENERIC
+from eth_rescue.types import RescueData
 
 REQUIRED_ACTION_KEYS = ("address", "function_signature", "args")
 TRANSIENT_AUCTION_HOUSES = {
@@ -226,25 +221,6 @@ def revise_rescue_data(
             return None
 
 
-def save_config(actions: list[RescueData]) -> None:
-    """Offer to save the built plan to a JSON file for future reuse."""
-    if not prompt_yes_no("Save this plan to a file for future use?", default=True):
-        return
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    default_name = f"rescue-{datetime.now():%Y%m%d-%H%M%S}.json"
-    name = prompt_text("File name", default=default_name) or default_name
-    if not name.endswith(".json"):
-        name += ".json"
-    path = (
-        name
-        if os.path.isabs(name) or os.sep in name
-        else os.path.join(CONFIG_DIR, name)
-    )
-    with open(path, "w") as f:
-        json.dump(actions, f, indent=2)
-    ui.success(f"Saved plan to {path}")
-
-
 def build_rescue_data(
     w3: Web3,
     victim_address: str = "",
@@ -252,8 +228,7 @@ def build_rescue_data(
 ) -> list[RescueData]:
     """
     Step 1 of the flow: produce the list of rescue actions, either by loading a
-    saved JSON config or by walking the guided wizard. Wizard-built plans can be
-    saved for next time.
+    JSON config or by walking the guided wizard.
     """
     setup_mode = prompt_select(
         "How would you like to set up the rescue?",
@@ -293,5 +268,4 @@ def build_rescue_data(
             actions.extend(new_actions)
 
     print_plan(actions)
-    save_config(actions)
     return actions

@@ -3,8 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 import requests
-from eth_account import Account
+from eth_account import Account, messages
 from hexbytes import HexBytes
+from web3 import Web3
 
 from rescue_scripts.relay import RelayClient, RelayError, RelayRPCError
 
@@ -58,7 +59,32 @@ def test_send_bundle_signs_exact_json_rpc_body(monkeypatch):
     assert request["headers"]["X-Flashbots-Signature"].startswith(
         f"{signer.address}:"
     )
+    address, signature = request["headers"]["X-Flashbots-Signature"].split(":")
+    digest = Web3.keccak(text=request["data"]).to_0x_hex()
+    assert digest.startswith("0x")
+    assert signature.startswith("0x")
+    recovered = Account.recover_message(
+        messages.encode_defunct(text=digest), signature=signature
+    )
+    assert address == recovered == signer.address
     assert submission.bundle_hash == "0xabc"
+
+
+def test_send_bundle_omits_builders_when_not_configured(monkeypatch):
+    request_params = []
+    client = _client()
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda method, params: request_params.extend(params)
+        or {"bundleHash": "0xabc"},
+    )
+
+    client.send_bundle(
+        [{"signed_transaction": HexBytes("0x1234")}], target_block_number=42
+    )
+
+    assert request_params == [{"txs": ["0x1234"], "blockNumber": "0x2a"}]
 
 
 def test_simulate_builds_expected_call_bundle_request(monkeypatch):
@@ -89,7 +115,7 @@ def test_simulate_builds_expected_call_bundle_request(monkeypatch):
                 {
                     "txs": ["0x1234", "0xabcd"],
                     "blockNumber": "0x67",
-                    "stateBlockNumber": "0x66",
+                    "stateBlockNumber": "latest",
                     "timestamp": 1_036,
                 }
             ],
@@ -133,6 +159,23 @@ def test_request_wraps_transport_and_invalid_json_errors(monkeypatch):
         lambda *args, **kwargs: InvalidJSONResponse({}),
     )
     with pytest.raises(RelayError, match="invalid json"):
+        client._request("eth_test", [{}])
+
+
+def test_request_includes_sanitized_http_error_response(monkeypatch):
+    client = _client()
+    response = requests.Response()
+    response.status_code = 403
+    response.url = "https://relay.example"
+    response._content = b"  request  blocked\nby policy  "
+
+    monkeypatch.setattr(
+        "rescue_scripts.relay.requests.post", lambda *args, **kwargs: response
+    )
+
+    with pytest.raises(
+        RelayError, match=r"403 Client Error.*Response: request blocked by policy"
+    ):
         client._request("eth_test", [{}])
 
 

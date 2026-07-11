@@ -17,6 +17,7 @@ class Network(TypedDict):
     rpc: str
     relay: str
     chain_id: int
+    builders: list[str] | None
 
 
 class PreparedAction(TypedDict):

@@ -268,6 +268,34 @@ def test_build_bundle_omits_zero_value_sweep():
     assert [tx["to"] for tx, _key in account.signed_txs] == ["victim", "target"]
 
 
+def test_prepare_bundle_targets_two_blocks_ahead(monkeypatch):
+    eth = SimpleNamespace(
+        block_number=100,
+        get_transaction_count=lambda address: 0,
+        get_balance=lambda address: 0,
+    )
+    w3 = SimpleNamespace(eth=eth)
+    monkeypatch.setattr(rescue, "_compute_fees", lambda w3, fee: (1, 20))
+    monkeypatch.setattr(rescue, "_max_next_block_effective_fee", lambda w3, fee: 10)
+    monkeypatch.setattr(rescue, "_has_7702_delegation", lambda w3, address: False)
+    monkeypatch.setattr(
+        rescue,
+        "_build_bundle",
+        lambda *args: [{"signed_transaction": b"fund"}],
+    )
+
+    bundle = rescue.prepare_bundle(
+        w3,
+        SimpleNamespace(address="victim"),
+        SimpleNamespace(address="gas"),
+        [],
+        "safe",
+        0.0,
+    )
+
+    assert bundle.target_block == 100 + rescue.TARGET_BLOCK_OFFSET
+
+
 def test_has_7702_delegation_recognizes_only_delegation_designator():
     victim = "0x0000000000000000000000000000000000000001"
 
@@ -537,10 +565,10 @@ def _run_send(monkeypatch, flashbots, balance=1_000_000):
 
 def test_send_with_retry_returns_true_when_included_first_attempt(monkeypatch):
     _patch_send(monkeypatch)
-    flashbots = FakeFlashbotsSender([_receipts()])
+    flashbots = FakeFlashbotsSender([_receipts()] + [_not_found()] * 4)
 
     assert _run_send(monkeypatch, flashbots) is True
-    assert flashbots.sent == [([{"signed_transaction": b"signed"}], 101)]
+    assert [target for _bundle, target in flashbots.sent] == [101, 102, 103, 104, 105]
 
 
 def test_send_with_retry_loops_until_included(monkeypatch):
@@ -552,12 +580,12 @@ def test_send_with_retry_loops_until_included(monkeypatch):
         lambda *args: (prepare_calls.append(1), _prepared_bundle())[1],
     )
     flashbots = FakeFlashbotsSender(
-        [_not_found(), _not_found(), _receipts()]
+        [_not_found()] * 5 + [_receipts()] + [_not_found()] * 4
     )
 
     assert _run_send(monkeypatch, flashbots) is True
-    assert len(flashbots.sent) == 3
-    assert len(prepare_calls) == 3  # fees and nonces refreshed every attempt
+    assert len(flashbots.sent) == 10
+    assert len(prepare_calls) == 2  # fees and nonces refreshed every batch
 
 
 def test_send_with_retry_submits_fresh_bundle_after_missed_block(monkeypatch):
@@ -565,29 +593,55 @@ def test_send_with_retry_submits_fresh_bundle_after_missed_block(monkeypatch):
     bundles = iter(
         [
             _prepared_bundle(entry=b"first", target_block=101),
-            _prepared_bundle(entry=b"second", target_block=102),
+            _prepared_bundle(entry=b"second", target_block=106),
         ]
     )
     monkeypatch.setattr(rescue, "prepare_bundle", lambda *args: next(bundles))
-    flashbots = FakeFlashbotsSender([_not_found(), _receipts()])
+    flashbots = FakeFlashbotsSender(
+        [_not_found()] * 5 + [_receipts()] + [_not_found()] * 4
+    )
+
+    assert _run_send(monkeypatch, flashbots) is True
+    assert flashbots.sent[:5] == [
+        ([{"signed_transaction": b"first"}], target)
+        for target in range(101, 106)
+    ]
+    assert flashbots.sent[5:] == [
+        ([{"signed_transaction": b"second"}], target)
+        for target in range(106, 111)
+    ]
+
+
+def test_send_with_retry_rebuilds_when_target_arrives_during_simulation(monkeypatch):
+    _patch_send(monkeypatch)
+    bundles = iter(
+        [
+            _prepared_bundle(entry=b"stale", target_block=100),
+            _prepared_bundle(entry=b"fresh", target_block=102),
+        ]
+    )
+    monkeypatch.setattr(rescue, "prepare_bundle", lambda *args: next(bundles))
+    flashbots = FakeFlashbotsSender([_receipts()] + [_not_found()] * 4)
 
     assert _run_send(monkeypatch, flashbots) is True
     assert flashbots.sent == [
-        ([{"signed_transaction": b"first"}], 101),
-        ([{"signed_transaction": b"second"}], 102),
+        ([{"signed_transaction": b"fresh"}], target)
+        for target in range(102, 107)
     ]
 
 
 def test_send_with_retry_rejects_incomplete_receipts(monkeypatch):
     _patch_send(monkeypatch)
-    flashbots = FakeFlashbotsSender([[]])
+    flashbots = FakeFlashbotsSender([[]] * rescue.BUNDLE_BLOCK_RANGE)
 
     assert _run_send(monkeypatch, flashbots) is False
 
 
 def test_send_with_retry_rejects_reverted_receipt(monkeypatch):
     _patch_send(monkeypatch)
-    flashbots = FakeFlashbotsSender([_receipts(status=0)])
+    flashbots = FakeFlashbotsSender(
+        [_receipts(status=0)] * rescue.BUNDLE_BLOCK_RANGE
+    )
 
     assert _run_send(monkeypatch, flashbots) is False
 
@@ -612,11 +666,15 @@ def test_send_with_retry_keeps_trying_when_user_confirms(monkeypatch):
         rescue, "prompt_yes_no", lambda *a, **k: confirms.append(1) or True
     )
     flashbots = FakeFlashbotsSender(
-        [_not_found()] * rescue.MAX_BLOCK_ATTEMPTS + [_receipts()]
+        [_not_found()] * rescue.MAX_BLOCK_ATTEMPTS
+        + [_receipts()]
+        + [_not_found()] * (rescue.BUNDLE_BLOCK_RANGE - 1)
     )
 
     assert _run_send(monkeypatch, flashbots) is True
-    assert len(flashbots.sent) == rescue.MAX_BLOCK_ATTEMPTS + 1
+    assert len(flashbots.sent) == (
+        rescue.MAX_BLOCK_ATTEMPTS + rescue.BUNDLE_BLOCK_RANGE
+    )
     assert len(confirms) == 1
 
 
@@ -624,7 +682,7 @@ def test_send_with_retry_refunds_when_balance_below_requirement(monkeypatch):
     _patch_send(monkeypatch, required=1000)
     refunds = []
     monkeypatch.setattr(rescue, "wait_for_funding", lambda *a: refunds.append(a[1:]))
-    flashbots = FakeFlashbotsSender([_receipts()])
+    flashbots = FakeFlashbotsSender([_receipts()] + [_not_found()] * 4)
     w3 = FakeWeb3Send(FakeEthSend(balance=[500, 1500]), flashbots)
 
     assert (

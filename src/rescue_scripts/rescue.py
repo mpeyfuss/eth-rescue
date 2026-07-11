@@ -7,7 +7,7 @@ from web3.exceptions import TransactionNotFound
 
 from rescue_scripts import ui
 from rescue_scripts.calldata import build_calldata
-from rescue_scripts.relay import RelayClient, RelayWeb3
+from rescue_scripts.relay import BUILDERS, RelayClient, RelayWeb3
 from rescue_scripts.prompts import (
     pause,
     prompt_address,
@@ -35,12 +35,14 @@ NETWORKS: dict[str, Network] = {
         "rpc": "https://ethereum-rpc.publicnode.com",
         "relay": "https://relay.flashbots.net",
         "chain_id": 1,
+        "builders": BUILDERS,
     },
     "sepolia": {
         "label": "Sepolia (testnet)",
         "rpc": "https://ethereum-sepolia-rpc.publicnode.com",
         "relay": "https://relay-sepolia.flashbots.net",
         "chain_id": 11155111,
+        "builders": None,
     },
 }
 
@@ -49,6 +51,8 @@ UNDELEGATE_TX_GAS = 60000
 SWEEP_TX_GAS = 21000
 FUNDING_BUFFER = 1.15  # extra headroom on the gas wallet for fee fluctuation
 MAX_BLOCK_ATTEMPTS = 25  # ~5 minutes of blocks before checking in with the user
+TARGET_BLOCK_OFFSET = 2
+BUNDLE_BLOCK_RANGE = 5
 SET_CODE_TX_TYPE = 0x04
 DELEGATION_DESIGNATOR_PREFIX = b"\xef\x01\x00"
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
@@ -143,7 +147,9 @@ def connect(auth: LocalAccount, network: Network) -> RelayWeb3:
     w3 = RelayWeb3(HTTPProvider(network["rpc"]))
     if not w3.is_connected():
         raise ConnectionError(f"Could not connect to {network['label']} RPC")
-    w3.relay = RelayClient(w3, auth, network["relay"])
+    w3.relay = RelayClient(
+        w3, auth, network["relay"], builders=network["builders"]
+    )
     return w3
 
 
@@ -398,12 +404,12 @@ def prepare_bundle(
     safe_address: str,
     extra_priority_fee_gwei: float,
 ) -> PreparedBundle:
-    """Build one immutable bundle for the next block from current chain state."""
+    """Build one immutable bundle two blocks ahead from current chain state."""
     victim_nonce = w3.eth.get_transaction_count(victim.address)
     gas_nonce = w3.eth.get_transaction_count(gas.address)
     priority_fee, max_fee_per_gas = _compute_fees(w3, extra_priority_fee_gwei)
     effective_fee_cap = _max_next_block_effective_fee(w3, priority_fee)
-    target_block = w3.eth.block_number + 1
+    target_block = w3.eth.block_number + TARGET_BLOCK_OFFSET
     victim_balance = w3.eth.get_balance(victim.address)
     needs_undelegation = _has_7702_delegation(w3, victim.address)
     entries = _build_bundle(
@@ -547,9 +553,9 @@ def send_with_retry(
     safe_address: str,
     extra_priority_fee_gwei: float,
 ) -> bool:
-    """Build, simulate, and submit a fresh exact bundle for each target block."""
+    """Build and simulate once per five-block submission window."""
     while True:
-        for attempt in range(1, MAX_BLOCK_ATTEMPTS + 1):
+        for batch_start in range(1, MAX_BLOCK_ATTEMPTS + 1, BUNDLE_BLOCK_RANGE):
             try:
                 bundle = prepare_bundle(
                     w3,
@@ -576,32 +582,53 @@ def send_with_retry(
                 )
                 return False
 
+            if w3.eth.block_number >= bundle.target_block:
+                ui.warning(
+                    f"Target block {bundle.target_block} arrived during simulation; "
+                    "rebuilding for a later block."
+                )
+                continue
+
             ui.info(
-                f"Attempt {attempt}/{MAX_BLOCK_ATTEMPTS} -> block {bundle.target_block} "
+                f"Attempts {batch_start}-{batch_start + BUNDLE_BLOCK_RANGE - 1}/"
+                f"{MAX_BLOCK_ATTEMPTS} -> blocks {bundle.target_block}-"
+                f"{bundle.target_block + BUNDLE_BLOCK_RANGE - 1} "
                 f"@ {w3.from_wei(bundle.max_fee_per_gas, 'gwei')} gwei ..."
             )
             try:
-                result = w3.relay.send_bundle(
-                    bundle.entries, target_block_number=bundle.target_block
-                )
-                with ui.console.status("Waiting for bundle result..."):
-                    result.wait()
-                receipts = result.receipts()
-                if len(receipts) != len(bundle.transactions):
-                    raise RuntimeError(
-                        "Relay submission did not return every transaction receipt"
+                submissions = [
+                    w3.relay.send_bundle(
+                        bundle.entries,
+                        target_block_number=bundle.target_block + block_offset,
                     )
-                if any(receipt["status"] != 1 for receipt in receipts):
-                    raise RuntimeError("One or more rescue transactions reverted")
-                ui.success("Bundle included.")
-                ui.info(f"Block: {receipts[0].blockNumber}")
-                ui.info(f"Tx hashes: {[r.transactionHash.hex() for r in receipts]}")
-                return True
-            except TransactionNotFound:
-                continue
+                    for block_offset in range(BUNDLE_BLOCK_RANGE)
+                ]
             except Exception as e:
                 ui.error(f"Relay submission failed: {e}")
                 return False
+
+            for result in submissions:
+                try:
+                    with ui.console.status("Waiting for bundle result..."):
+                        result.wait()
+                    receipts = result.receipts()
+                    if len(receipts) != len(bundle.transactions):
+                        raise RuntimeError(
+                            "Relay submission did not return every transaction receipt"
+                        )
+                    if any(receipt["status"] != 1 for receipt in receipts):
+                        raise RuntimeError("One or more rescue transactions reverted")
+                    ui.success("Bundle included.")
+                    ui.info(f"Block: {receipts[0].blockNumber}")
+                    ui.info(
+                        f"Tx hashes: {[r.transactionHash.hex() for r in receipts]}"
+                    )
+                    return True
+                except TransactionNotFound:
+                    continue
+                except Exception as e:
+                    ui.error(f"Relay submission failed: {e}")
+                    return False
 
         if not prompt_yes_no(
             f"\nNot included after {MAX_BLOCK_ATTEMPTS} blocks. Keep trying?",

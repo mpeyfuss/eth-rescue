@@ -18,6 +18,7 @@ from rescue_scripts.types import (
 )
 
 SECONDS_PER_BLOCK = 12
+MAX_ERROR_BODY_LENGTH = 1_000
 
 BUILDERS = [
     "flashbots",
@@ -84,7 +85,7 @@ class RelayClient:
         self.w3 = w3
         self.signature_account = signature_account
         self.endpoint_uri = endpoint_uri
-        self.builders = builders or BUILDERS
+        self.builders = builders
         self.timeout = timeout
         self._request_id = 0
 
@@ -96,13 +97,13 @@ class RelayClient:
         body = json.dumps(
             {
                 "jsonrpc": "2.0",
-                "id": self._request_id,
                 "method": method,
                 "params": params,
+                "id": self._request_id,
             },
             separators=(",", ":"),
-        ).encode()
-        digest = Web3.keccak(body).hex()
+        )
+        digest = Web3.keccak(text=body).to_0x_hex()
         signed = Account.sign_message(
             messages.encode_defunct(text=digest),
             private_key=self.signature_account.key,
@@ -114,16 +115,25 @@ class RelayClient:
                 data=body,
                 headers={
                     "Content-Type": "application/json",
-                    "X-Flashbots-Signature": (
-                        f"{self.signature_account.address}:"
-                        f"{signed.signature.to_0x_hex()}"
-                    ),
+                    "X-Flashbots-Signature": f"{self.signature_account.address}:{signed.signature.to_0x_hex()}",  # fmt: skip
                 },
                 timeout=self.timeout,
             )
+        except requests.RequestException as e:
+            raise RelayError(f"Relay request failed: {e}") from e
+
+        try:
             response.raise_for_status()
+        except requests.HTTPError as e:
+            detail = " ".join(response.text.split())
+            if len(detail) > MAX_ERROR_BODY_LENGTH:
+                detail = f"{detail[:MAX_ERROR_BODY_LENGTH]}..."
+            suffix = f" Response: {detail}" if detail else ""
+            raise RelayError(f"Relay request failed: {e}.{suffix}") from e
+
+        try:
             payload: RPCResponse[Any] = response.json()
-        except (requests.RequestException, ValueError) as e:
+        except ValueError as e:
             raise RelayError(f"Relay request failed: {e}") from e
 
         if "error" in payload:
@@ -160,7 +170,7 @@ class RelayClient:
                 {
                     "txs": [tx.to_0x_hex() for tx in raw_transactions],
                     "blockNumber": hex(block_number),
-                    "stateBlockNumber": hex(block_number - 1),
+                    "stateBlockNumber": "latest",
                     "timestamp": timestamp,
                 }
             ],
@@ -168,7 +178,9 @@ class RelayClient:
 
         tx_results = result.get("results")
         if not isinstance(tx_results, list):
-            raise RelayError("Relay simulation response did not include transaction results")
+            raise RelayError(
+                "Relay simulation response did not include transaction results"
+            )
         simulation: SimulationResult = {
             "bundleHash": result.get("bundleHash", ""),
             "results": tx_results,
@@ -181,16 +193,13 @@ class RelayClient:
         self, bundle: list[BundleEntry], target_block_number: int
     ) -> BundleSubmission:
         raw_transactions = self._raw_transactions(bundle)
-        result: SendBundleResult = self._request(
-            "eth_sendBundle",
-            [
-                {
-                    "txs": [tx.to_0x_hex() for tx in raw_transactions],
-                    "blockNumber": hex(target_block_number),
-                    "builders": self.builders,
-                }
-            ],
-        )
+        params = {
+            "txs": [tx.to_0x_hex() for tx in raw_transactions],
+            "blockNumber": hex(target_block_number),
+        }
+        if self.builders is not None:
+            params["builders"] = self.builders
+        result: SendBundleResult = self._request("eth_sendBundle", [params])
         return BundleSubmission(
             self.w3,
             tuple(self.w3.keccak(tx) for tx in raw_transactions),

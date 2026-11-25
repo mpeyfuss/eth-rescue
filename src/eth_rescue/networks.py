@@ -4,6 +4,8 @@ from web3 import HTTPProvider
 from eth_rescue.relay import BUILDERS, RelayClient, RelayWeb3
 from eth_rescue.types import Network
 
+# `eth_rescue` is the EthRescue deployment victims delegate to; None until it
+# is deployed on that network.
 NETWORKS: dict[str, Network] = {
     "mainnet": {
         "label": "Ethereum mainnet",
@@ -11,6 +13,7 @@ NETWORKS: dict[str, Network] = {
         "relay": "https://relay.flashbots.net",
         "chain_id": 1,
         "builders": BUILDERS,
+        "eth_rescue": None,
     },
     "sepolia": {
         "label": "Sepolia (testnet)",
@@ -18,6 +21,7 @@ NETWORKS: dict[str, Network] = {
         "relay": "https://relay-sepolia.flashbots.net",
         "chain_id": 11155111,
         "builders": None,
+        "eth_rescue": None,
     },
 }
 

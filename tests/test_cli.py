@@ -1,4 +1,6 @@
+import argparse
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -74,6 +76,16 @@ def test_run_rejects_invalid_plan_before_connecting(tmp_path, monkeypatch, capsy
     assert event["level"] == "error"
 
 
+def test_run_refuses_network_without_eth_rescue_before_connecting(monkeypatch, capsys):
+    monkeypatch.setitem(cli.NETWORKS["mainnet"], "eth_rescue", None)
+    monkeypatch.setattr(cli, "connect", lambda *a, **k: pytest.fail("connected"))
+    monkeypatch.setattr(cli, "read_accounts", lambda plan: pytest.fail("read keys"))
+
+    assert main(["run", str(EXAMPLE), "--json"]) == ExitCode.INVALID
+    event = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert event["text"] == "EthRescue is not deployed on Ethereum mainnet yet"
+
+
 def test_read_accounts_returns_matching_keys(keys):
     keys.extend([to_hex(VICTIM.key), to_hex(GAS.key)])
 
@@ -115,3 +127,23 @@ def test_read_accounts_rejects_safe_as_gas_wallet(keys):
 
     with pytest.raises(CliError, match="must differ"):
         read_accounts(_plan())
+
+
+@pytest.mark.parametrize("value", ["1", "1.25", "10"])
+def test_gas_multiplier_accepts_bounded_decimals(value):
+    assert cli.gas_multiplier(value) == Decimal(value)
+
+
+@pytest.mark.parametrize("value", ["0.9", "10.5", "-2", "abc", "NaN"])
+def test_gas_multiplier_rejects_out_of_range_or_non_numeric(value):
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli.gas_multiplier(value)
+
+
+def test_rescue_commands_default_and_parse_gas_multiplier():
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["simulate", "plan.json"]).gas_multiplier == Decimal("1.5")
+    assert parser.parse_args(
+        ["run", "plan.json", "--gas-multiplier", "3"]
+    ).gas_multiplier == Decimal(3)

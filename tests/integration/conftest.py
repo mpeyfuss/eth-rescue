@@ -20,6 +20,7 @@ from eth_rescue.types import BundleEntry, SimulationResult
 
 ANVIL_HARDFORK = os.environ.get("ANVIL_HARDFORK", "osaka")
 CONTRACT_OUT = Path(__file__).parent / "contracts" / "out" / "Fixtures.sol"
+ETH_RESCUE_OUT = Path(__file__).parents[2] / "contracts" / "out" / "EthRescue.sol"
 
 
 def _available_port() -> int:
@@ -159,16 +160,16 @@ class SequentialRelay:
         return SequentialSubmission(tuple(receipts))
 
 
-def _artifact(name: str) -> tuple[list[dict[str, Any]], str]:
-    path = CONTRACT_OUT / f"{name}.json"
+def _artifact(name: str, out: Path = CONTRACT_OUT) -> tuple[list[dict[str, Any]], str]:
+    path = out / f"{name}.json"
     if not path.exists():
         pytest.fail("integration contracts are not compiled; run make test-integration")
     artifact = json.loads(path.read_text())
     return artifact["abi"], artifact["bytecode"]["object"]
 
 
-def _deploy(w3: Web3, name: str):
-    abi, bytecode = _artifact(name)
+def _deploy(w3: Web3, name: str, out: Path = CONTRACT_OUT):
+    abi, bytecode = _artifact(name, out)
     factory = w3.eth.contract(abi=abi, bytecode=bytecode)
     tx_hash = factory.constructor().transact({"from": w3.eth.accounts[0]})
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
@@ -253,7 +254,13 @@ def asset_contracts(anvil_w3: Web3, rescue_accounts):
 
 
 @pytest.fixture
-def make_ctx(anvil_w3: Web3, reporter):
+def rescue_contract(anvil_w3: Web3):
+    """The EthRescue deployment victims delegate to, as `networks.py` pins it."""
+    return _deploy(anvil_w3, "EthRescue", ETH_RESCUE_OUT)
+
+
+@pytest.fixture
+def make_ctx(anvil_w3: Web3, reporter, rescue_contract):
     """Build a RescueContext that never sleeps; extra fields override defaults."""
 
     def make(victim, gas, safe, **overrides) -> RescueContext:
@@ -263,6 +270,7 @@ def make_ctx(anvil_w3: Web3, reporter):
             "gas": gas,
             "safe": safe.address,
             "reporter": reporter,
+            "rescue_contract": rescue_contract.address,
             "poll_interval": 0,
             "funding_timeout": 0,
             "sleep": lambda seconds: None,

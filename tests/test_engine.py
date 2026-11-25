@@ -1,3 +1,4 @@
+from decimal import Decimal
 from types import SimpleNamespace
 
 from hexbytes import HexBytes
@@ -100,6 +101,7 @@ def _ctx(reporter, relay=None, eth=None, **overrides):
         "gas": GAS,
         "safe": "safe",
         "reporter": reporter,
+        "rescue_contract": "0x" + "55" * 20,
         "poll_interval": 12,
         "funding_timeout": 60,
         "sleep": clock.sleep,
@@ -395,3 +397,28 @@ def test_call_results_maps_logs_across_batches():
     results = engine.call_results(Inclusion(bundle, receipts), victim)
 
     assert results == {0: True, 1: False, 2: False}
+
+
+def test_sized_actions_uses_context_gas_multiplier(reporter, monkeypatch):
+    seen = []
+
+    def fake_size(w3, sender, prepared, multiplier):
+        seen.append((sender, multiplier))
+        return [action | {"gas": 300_000} for action in prepared], {}
+
+    monkeypatch.setattr(engine, "size_actions", fake_size)
+    ctx = _ctx(reporter, gas_multiplier=Decimal(3))
+    rescue_data = [
+        {
+            "address": "0x" + "33" * 20,
+            "function_signature": "run()",
+            "args": [],
+            "gas_estimate": 100_000,
+        }
+    ]
+
+    prepared = engine.sized_actions(ctx, rescue_data)
+
+    assert seen == [(VICTIM.address, Decimal(3))]
+    assert prepared[0]["gas"] == 300_000
+    assert "raised from 100,000 to 300,000" in reporter.messages("info")[0]

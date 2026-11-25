@@ -20,6 +20,7 @@ class Network(TypedDict):
     relay: str
     chain_id: int
     builders: list[str] | None
+    eth_rescue: str | None
 
 
 class PreparedAction(TypedDict):
@@ -56,9 +57,7 @@ class SendBundleResult(TypedDict):
     bundleHash: str
 
 
-TransactionRole = Literal[
-    "deploy", "rescue-7702", "undelegate", "fund", "rescue", "sweep"
-]
+TransactionRole = Literal["rescue-7702", "undelegate", "fund", "rescue", "sweep"]
 
 
 @dataclass(frozen=True)
@@ -84,6 +83,7 @@ class PreparedBundle:
     sweep_value: int
     expected_residual: int
     rescue_contract: str | None = None
+    warnings: tuple[str, ...] = ()
 
     @property
     def entries(self) -> list[BundleEntry]:

@@ -1,17 +1,20 @@
+import math
 from collections.abc import Callable
 from decimal import Decimal
 
 from eth_account.account import Account
+from eth_account.datastructures import SignedSetCodeAuthorization
 from eth_account.signers.local import LocalAccount
-from eth_utils import to_checksum_address, to_hex
+from eth_utils import to_canonical_address, to_checksum_address, to_hex
 from hexbytes import HexBytes
 from web3 import Web3
 
 from eth_rescue.calldata import build_calldata
 from eth_rescue.contract import (
-    build_deploy_data,
-    compute_create_address,
+    RescueRequest,
+    actions_hash,
     encode_rescue_call,
+    sign_rescue_request,
 )
 from eth_rescue.templates import GAS_GENERIC
 from eth_rescue.types import (
@@ -32,18 +35,32 @@ MAX_ACTIONS_PER_RESCUE = 128  # actions per rescue() call in the 7702 bundle
 # must never exceed it.
 MAX_TX_GAS = 2**24
 MAX_ACTION_GAS = 8_000_000
-# Intrinsic + authorization + dispatch + sweep CALL, excluding new-account
-# creation (charged separately). Measured ~46k Osaka (+25k fresh safe), ~86k
-# Amsterdam.
+# EthRescue never checks gas itself: only the gas wallet can submit, so these
+# budgets are the only thing standing between a rescue and starved actions.
+# Intrinsic + authorization + request verification + dispatch, excluding the
+# sweep. Measured ~46k Osaka, ~86k Amsterdam (sweep included).
 RESCUE_TX_FIXED_GAS = 150_000
-# Cold call, ActionResult event and loop cost outside each stipend; ~3k measured
-# on Osaka and Amsterdam. Calldata is budgeted at the 16 gas/byte upper bound.
+# The sweep CALL to an existing safe, including a contract safe's receive();
+# creating an empty safe is budgeted separately from a live estimate.
+SWEEP_CALL_GAS = 40_000
+# Per action beyond its stipend: cold call, ActionResult event and loop (~3k
+# measured on both forks), plus actions-hash work. Calldata is budgeted
+# separately at the 16 gas/byte upper bound.
 RESCUE_ACTION_OVERHEAD_GAS = 6_000
+# Each retry window rebuilds and re-signs, so requests only need to outlive one.
+RESCUE_REQUEST_TTL = 600
 CALLDATA_GAS_PER_BYTE = 16
 # Used only when no funded account can estimate a transfer to an empty safe;
 # covers Amsterdam's 120 * CPSB = 183,600 new-account state gas.
 NEW_ACCOUNT_GAS_FALLBACK = 250_000
-ESTIMATE_MARGIN_NUMERATOR, ESTIMATE_MARGIN_DENOMINATOR = 3, 2  # 1.5x
+# Whole-transaction estimates only ever raise the constant budget. The node's
+# estimator cannot see an action starving inside tryCall (the transaction still
+# succeeds), so an estimate alone is never trusted as a gas limit.
+TX_ESTIMATE_MULTIPLIER = Decimal("1.5")
+# Applied to each action's live estimate; overridable with --gas-multiplier.
+DEFAULT_GAS_MULTIPLIER = Decimal("1.5")
+MIN_GAS_MULTIPLIER = Decimal(1)
+MAX_GAS_MULTIPLIER = Decimal(10)
 TARGET_BLOCK_OFFSET = 1
 BUNDLE_BLOCK_RANGE = 5  # target current +1 through current +5 (relay maximum)
 SET_CODE_TX_TYPE = 0x04
@@ -74,10 +91,11 @@ def _max_next_block_effective_fee(w3: Web3, priority_fee: int) -> int:
 def _action_tx_gas(action: PreparedAction) -> int:
     """Gas one action adds to a rescue() transaction, including its calldata."""
     data_length = (len(action["data"]) - 2) // 2
-    # offset + 4 head words + bytes length, then the padded bytes payload
-    encoded_length = 6 * 32 + -(-data_length // 32) * 32
+    # offset + 3 head words + bytes length, then the padded bytes payload
+    encoded_length = 5 * 32 + -(-data_length // 32) * 32
     return (
         action["gas"]
+        + action["gas"] // 63  # EIP-150: the full stipend needs 64/63 available
         + RESCUE_ACTION_OVERHEAD_GAS
         + CALLDATA_GAS_PER_BYTE * encoded_length
     )
@@ -102,9 +120,12 @@ def prepare_actions(rescue_data: list[RescueData]) -> list[PreparedAction]:
 
 
 def size_actions(
-    w3: Web3, sender: str, prepared: list[PreparedAction]
+    w3: Web3,
+    sender: str,
+    prepared: list[PreparedAction],
+    multiplier: Decimal = DEFAULT_GAS_MULTIPLIER,
 ) -> tuple[list[PreparedAction], dict[int, str]]:
-    """Raise each action's gas limit to its live estimate with margin.
+    """Raise each action's gas limit to its live estimate times `multiplier`.
 
     The template or plan gas is a floor: an estimate (which an attacker may
     influence through chain state) can only increase a limit, never lower it.
@@ -122,7 +143,7 @@ def size_actions(
             failures[index] = str(e)
             sized.append(action)
             continue
-        margin = estimate * ESTIMATE_MARGIN_NUMERATOR // ESTIMATE_MARGIN_DENOMINATOR
+        margin = math.ceil(estimate * multiplier)
         sized.append(action | {"gas": max(action["gas"], min(margin, MAX_ACTION_GAS))})
     return sized, failures
 
@@ -146,15 +167,8 @@ def _new_account_gas(w3: Web3, funded_sender: str, safe: str) -> int:
     return max(0, estimate - SWEEP_TX_GAS)
 
 
-def _deploy_tx_gas(w3: Web3, deploy_data: bytes) -> int:
-    """The deploy cost is a pure function of the initcode and the fork's code
-    deposit pricing, so the node's estimate is exact; there is no fallback
-    because EIP-8037 makes any fixed guess dangerously low."""
-    return int(w3.eth.estimate_gas({"data": to_hex(deploy_data)}) * 1.1)
-
-
 def _rescue_base_gas(new_account_gas: int) -> int:
-    return RESCUE_TX_FIXED_GAS + new_account_gas
+    return RESCUE_TX_FIXED_GAS + SWEEP_CALL_GAS + new_account_gas
 
 
 def _batch_tx_gas(batch: list[PreparedAction], base_gas: int) -> int:
@@ -187,13 +201,9 @@ def _rescue_batches(
     return batches
 
 
-def _required_funding_7702(
-    deploy_gas: int, prepared: list[PreparedAction], max_fee_per_gas: int, base_gas: int
-) -> int:
-    """Total ETH the gas wallet must hold for the deploy + rescue call txs."""
-    total_gas = deploy_gas + sum(
-        _batch_tx_gas(batch, base_gas) for batch in _rescue_batches(prepared, base_gas)
-    )
+def _required_funding_7702(rescue_gas_limits: list[int], max_fee_per_gas: int) -> int:
+    """Total ETH the gas wallet must hold for the rescue calls."""
+    total_gas = sum(rescue_gas_limits)
     return int(total_gas * max_fee_per_gas * FUNDING_BUFFER)
 
 
@@ -274,53 +284,18 @@ def has_7702_delegation(w3: Web3, address: str) -> bool:
     raise ValueError(f"Victim account {address} has unexpected non-EIP-7702 code")
 
 
-def _sign_deploy_tx(
-    *,
-    chain_id: int,
-    tx_nonce: int,
-    deploy_data: bytes,
-    deploy_gas: int,
-    sponsor_key: bytes,
-    priority_fee: int,
-    max_fee_per_gas: int,
-) -> HexBytes:
-    signed = Account.sign_transaction(
-        {
-            "chainId": chain_id,
-            "nonce": tx_nonce,
-            "maxPriorityFeePerGas": priority_fee,
-            "maxFeePerGas": max_fee_per_gas,
-            "gas": deploy_gas,
-            "value": 0,
-            "data": deploy_data,
-        },
-        sponsor_key,
-    )
-    return signed.raw_transaction
-
-
 def _sign_7702_rescue_tx(
     *,
     chain_id: int,
     tx_nonce: int,
-    victim_nonce: int,
-    victim_key: bytes,
+    authorization: SignedSetCodeAuthorization,
     victim_address: str,
     sponsor_key: bytes,
-    rescue_contract: str,
     calldata: bytes,
     gas: int,
     priority_fee: int,
     max_fee_per_gas: int,
 ) -> HexBytes:
-    authorization = Account.sign_authorization(
-        {
-            "chainId": chain_id,
-            "address": rescue_contract,
-            "nonce": victim_nonce,
-        },
-        victim_key,
-    )
     signed = Account.sign_transaction(
         {
             "type": SET_CODE_TX_TYPE,
@@ -340,6 +315,86 @@ def _sign_7702_rescue_tx(
     return signed.raw_transaction
 
 
+def _authorization_param(authorization: SignedSetCodeAuthorization) -> dict:
+    return {
+        "chainId": authorization.chain_id,
+        "address": to_checksum_address(authorization.address),
+        "nonce": authorization.nonce,
+        "yParity": authorization.y_parity,
+        "r": authorization.r,
+        "s": authorization.s,
+    }
+
+
+def _estimated_rescue_gas(
+    w3: Web3,
+    sponsor: str,
+    victim: str,
+    rescue_contract: str,
+    authorization: SignedSetCodeAuthorization,
+    calldatas: list[bytes],
+    budgets: list[int],
+) -> tuple[list[int], list[str]]:
+    """Raise each batch's budget to its whole-transaction estimate with margin.
+
+    The first batch is estimated with its 7702 authorization. Later batches run
+    after that delegation exists, so they are estimated with a state override
+    giving the victim the delegation code; an RPC without override support just
+    leaves them on the constant budget.
+    """
+    delegated = {
+        victim: {
+            "code": to_hex(
+                DELEGATION_DESIGNATOR_PREFIX + to_canonical_address(rescue_contract)
+            )
+        }
+    }
+    limits: list[int] = []
+    warnings: list[str] = []
+    for index, (calldata, budget) in enumerate(zip(calldatas, budgets)):
+        transaction = {"from": sponsor, "to": victim, "data": to_hex(calldata)}
+        override = None
+        if index == 0:
+            transaction |= {
+                "type": SET_CODE_TX_TYPE,
+                "authorizationList": [_authorization_param(authorization)],
+            }
+        else:
+            override = delegated
+        try:
+            estimate = w3.eth.estimate_gas(transaction, state_override=override)
+        except Exception as e:  # unsupported type-4 or override, or a revert
+            warnings.append(
+                f"Could not estimate rescue transaction #{index + 1}; using the "
+                f"fixed budget of {budget:,} gas: {e}"
+            )
+            limits.append(budget)
+            continue
+        raised = math.ceil(estimate * TX_ESTIMATE_MULTIPLIER)
+        limits.append(min(MAX_TX_GAS, max(budget, raised)))
+    return limits, warnings
+
+
+def _signed_rescue_calldata(
+    w3: Web3,
+    victim: LocalAccount,
+    gas: LocalAccount,
+    batch: list[PreparedAction],
+    safe_address: str,
+    deadline: int,
+) -> bytes:
+    request = RescueRequest(
+        rescuer=gas.address,
+        safe=safe_address,
+        deadline=deadline,
+        actions_hash=actions_hash(batch),
+    )
+    signature = sign_rescue_request(
+        victim.key, w3.eth.chain_id, victim.address, request
+    )
+    return encode_rescue_call(request, batch, signature)
+
+
 def prepare_7702_bundle(
     w3: Web3,
     victim: LocalAccount,
@@ -347,9 +402,12 @@ def prepare_7702_bundle(
     prepared: list[PreparedAction],
     safe_address: str,
     extra_priority_fee_gwei: Decimal,
+    *,
+    rescue_contract: str,
 ) -> PreparedBundle:
-    """Build the phase-1 bundle: deploy EthRescue, then rescue everything
-    through the victim's delegation in one sponsored call per batch.
+    """Build the phase-1 bundle: delegate the victim to the network's EthRescue
+    deployment and rescue everything in one sponsored call per batch, each
+    authorized by a victim-signed EIP-712 request bound to the gas wallet.
 
     All actions are optional inside rescue(): if one fails mid-race the call
     still succeeds, the bundle stays valid, and the full ETH balance is swept.
@@ -358,42 +416,48 @@ def prepare_7702_bundle(
     gas_nonce = w3.eth.get_transaction_count(gas.address)
     priority_fee, max_fee_per_gas = _compute_fees(w3, extra_priority_fee_gwei)
     effective_fee_cap = _max_next_block_effective_fee(w3, priority_fee)
-    target_block = w3.eth.block_number + TARGET_BLOCK_OFFSET
+    latest = w3.eth.get_block("latest")
+    target_block = latest["number"] + TARGET_BLOCK_OFFSET
+    deadline = latest["timestamp"] + RESCUE_REQUEST_TTL
     chain_id = w3.eth.chain_id
 
-    rescue_contract = compute_create_address(gas.address, gas_nonce)
-    deploy_data = build_deploy_data(gas.address, safe_address)
-    deploy_gas = _deploy_tx_gas(w3, deploy_data)
-    base_gas = _rescue_base_gas(_new_account_gas(w3, gas.address, safe_address))
-
-    transactions: list[BundleTransaction] = [
-        BundleTransaction(
-            "deploy",
-            _sign_deploy_tx(
-                chain_id=chain_id,
-                tx_nonce=gas_nonce,
-                deploy_data=deploy_data,
-                deploy_gas=deploy_gas,
-                sponsor_key=gas.key,
-                priority_fee=priority_fee,
-                max_fee_per_gas=max_fee_per_gas,
-            ),
-        )
-    ]
+    new_account_gas = _new_account_gas(w3, gas.address, safe_address)
+    base_gas = _rescue_base_gas(new_account_gas)
     batches = _rescue_batches(prepared, base_gas)
+
+    transactions: list[BundleTransaction] = []
+    rescue_nonce = gas_nonce
+
+    authorization = Account.sign_authorization(
+        {"chainId": chain_id, "address": rescue_contract, "nonce": victim_nonce},
+        victim.key,
+    )
+    calldatas = [
+        _signed_rescue_calldata(w3, victim, gas, batch, safe_address, deadline)
+        for batch in batches
+    ]
+    gas_limits = [_batch_tx_gas(batch, base_gas) for batch in batches]
+    gas_limits, warnings = _estimated_rescue_gas(
+        w3,
+        gas.address,
+        victim.address,
+        rescue_contract,
+        authorization,
+        calldatas,
+        gas_limits,
+    )
+
     transactions.append(
         BundleTransaction(
             "rescue-7702",
             _sign_7702_rescue_tx(
                 chain_id=chain_id,
-                tx_nonce=gas_nonce + 1,
-                victim_nonce=victim_nonce,
-                victim_key=victim.key,
+                tx_nonce=rescue_nonce,
+                authorization=authorization,
                 victim_address=victim.address,
                 sponsor_key=gas.key,
-                rescue_contract=rescue_contract,
-                calldata=encode_rescue_call(batches[0]),
-                gas=_batch_tx_gas(batches[0], base_gas),
+                calldata=calldatas[0],
+                gas=gas_limits[0],
                 priority_fee=priority_fee,
                 max_fee_per_gas=max_fee_per_gas,
             ),
@@ -403,17 +467,17 @@ def prepare_7702_bundle(
     # The delegation set by the first rescue tx is live for the rest of the
     # bundle, so continuation batches are plain sponsored calls to the victim.
     batch_start = len(batches[0])
-    for offset, batch in enumerate(batches[1:], start=2):
+    for offset in range(1, len(batches)):
         signed = Account.sign_transaction(
             {
                 "chainId": chain_id,
-                "nonce": gas_nonce + offset,
+                "nonce": rescue_nonce + offset,
                 "maxPriorityFeePerGas": priority_fee,
                 "maxFeePerGas": max_fee_per_gas,
-                "gas": _batch_tx_gas(batch, base_gas),
+                "gas": gas_limits[offset],
                 "to": victim.address,
                 "value": 0,
-                "data": encode_rescue_call(batch),
+                "data": calldatas[offset],
             },
             gas.key,
         )
@@ -422,7 +486,7 @@ def prepare_7702_bundle(
                 "rescue-7702", signed.raw_transaction, batch_start=batch_start
             )
         )
-        batch_start += len(batch)
+        batch_start += len(batches[offset])
 
     return PreparedBundle(
         transactions=transactions,
@@ -432,13 +496,12 @@ def prepare_7702_bundle(
         max_fee_per_gas=max_fee_per_gas,
         effective_fee_cap=effective_fee_cap,
         target_block=target_block,
-        required_funding=_required_funding_7702(
-            deploy_gas, prepared, max_fee_per_gas, base_gas
-        ),
+        required_funding=_required_funding_7702(gas_limits, max_fee_per_gas),
         victim_funding=0,
         sweep_value=0,
         expected_residual=0,
         rescue_contract=rescue_contract,
+        warnings=tuple(warnings),
     )
 
 

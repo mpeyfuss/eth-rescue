@@ -61,7 +61,7 @@ Rules:
 
 ### Schema source of truth
 
-Pydantic models in `src/eth_rescue/plan.py` are the source of truth. `eth-rescue schema` prints JSON Schema, which is committed at `schema/plan.v1.schema.json` and consumed by the web app. That gives typegen via `json-schema-to-typescript` and runtime validation via `ajv`. A Python test fails if the committed schema is stale, the same pattern as the existing bytecode-staleness test.
+Pydantic models in `src/eth_rescue/plan.py` are the source of truth. `eth-rescue schema` prints JSON Schema, which is committed at `schema/plan.v1.schema.json` and consumed by the web app. That gives typegen via `json-schema-to-typescript` and runtime validation via `ajv`. A Python test fails if the committed schema is stale.
 
 `pydantic` is a new runtime dependency (decided).
 
@@ -79,7 +79,7 @@ Pydantic models in `src/eth_rescue/plan.py` are the source of truth. `eth-rescue
 | `eth-rescue gas-wallet new` | no | no | Generate a fresh gas wallet and print its address and key once. |
 | `eth-rescue schema` | no | no | Print the plan JSON Schema. |
 
-Flags: `--yes` (skip the single send confirmation), `--rpc URL` (override the public RPC), `--json` (NDJSON events on stdout for scripting and tests; human-readable output goes to stderr).
+Flags: `--yes` (skip the single send confirmation), `--rpc URL` (override the public RPC), `--json` (NDJSON events on stdout for scripting and tests; human-readable output goes to stderr), `--gas-multiplier X` (multiply each action's live gas estimate by X, 1–10, default 1.5; the plan's gas is always the minimum and failed estimates keep it).
 
 Argument parsing uses stdlib `argparse`, so no new dependency.
 
@@ -189,7 +189,7 @@ Makefile gains `web-dev`, `web-test`, `web-build`, and `schema`.
 
 - **Gas budget scales with action count.** `RESCUE_TX_OVERHEAD` is a flat 120k. It doesn't cover per-action calldata and the first call to each target when many actions burn their full gas limit (e.g. old `throw`/`assert` contracts losing a race). If the sweep runs out of gas, the transaction reverts and the bundle is dropped. Fix: a fixed base plus a per-action allowance, and an Anvil test with N gas-burning actions under the real budget.
 - **Nonce race.** If the victim's nonce changes before our transaction in the same block, the 7702 authorization is skipped. The transaction succeeds but rescues nothing. The state checks report "failed", and the fallback or a rerun handles it. Add an integration test for this.
-- **`ActionResult(index, success)` event** in `EthRescue.rescue()`. This makes per-action call results readable from receipt logs, including for `custom` actions. State checks remain the source of truth for typed actions. Requires regenerating the embedded bytecode.
+- **`ActionResult(index, success)` event** in `EthRescue.rescue()`. This makes per-action call results readable from receipt logs, including for `custom` actions. State checks remain the source of truth for typed actions.
 
 ## 8. Gas and fork resilience (EIP-8037 / Amsterdam)
 
@@ -197,7 +197,9 @@ Measured on Anvil (`osaka` vs `amsterdam`):
 
 | Operation | Osaka | Amsterdam |
 | --- | --- | --- |
-| Deploy EthRescue (2,756-byte runtime) | 648k | 4.47M |
+| Deploy EthRescue v1 per rescue (2,756-byte runtime; replaced) | 648k | 4.47M |
+| Deploy EthRescue once per network, by the maintainer (4,649-byte runtime, before OZ EIP712) | 1.05M | 7.39M |
+| Singleton rescue tx: 1 ERC-721 action, fresh safe | 95.4k | 300.8k |
 | ETH transfer to a fresh account | 21k | 204.6k |
 | ERC-20 / ERC-1155 transfer to a fresh holder | 50k / 52k | 139.5k / 141k |
 | Set 7702 delegation / clear it | 36.8k / 36.8k | 64k / 28.8k |
@@ -205,13 +207,36 @@ Measured on Anvil (`osaka` vs `amsterdam`):
 
 Client rules (implemented):
 
-- **Measure, don't hardcode.** Per-action gas limits are live `eth_estimateGas` × 1.5, with template gas as a floor that an estimate can only raise. The sweep's new-account cost comes from a live transfer estimate. The deploy has no fixed fallback.
+- **Measure, don't hardcode.** Per-action gas limits are live `eth_estimateGas` × `--gas-multiplier` (default 1.5), with template gas as a floor that an estimate can only raise. The sweep's new-account cost comes from a live transfer estimate. The deploy has no fixed fallback.
 - **Size once, before any delegation changes.** Phase-1 estimates also describe the undelegated victim the legacy fallback runs as.
 - **Never exceed 2^24 gas per transaction.** Under EIP-8037, gas above the cap becomes a state-gas reservoir that `GAS`/`gasleft()` can't see and that bypasses call stipends. Staying under the cap keeps the reservoir at zero.
 - **Test every fork.** `make test-integration` runs Osaka and Amsterdam with EIP-7825 enforced. The gas-burner test asserts worst-case overhead uses ≤ 75% of its budget.
 
-Contract rules (for the #2 fix):
+Contract rules (implemented in section 9):
 
-- Base gas decisions only on `gasleft()` **before** calls (an aggregate worst-case check). Never infer anything from post-call `gasleft()`: refills from reverting frames and the reservoir make it unreliable (ChainSecurity patterns 1–3).
-- Reserves must cover state gas in the contract's own frame. The sweep's new-account charge is fork- and state-dependent, so the client supplies it rather than a constant.
+- **No gas introspection.** `EthRescue` never reads `gasleft()`, so EIP-8037's reservoir and state-gas refills can't change its logic. Per-action stipends stop a hostile target from starving later actions or the sweep.
+- **The gas limit is the client's job.** Only the signed rescuer can submit, so starvation can only come from the CLI's own budget. An earlier up-front `gasleft()` check was removed: its reserves came from the same CLI constants, and a miscalibration would revert the whole rescue instead of failing only the tail actions, which state checks catch and the legacy fallback retries.
+- **Client budget per rescue tx:** `RESCUE_TX_FIXED_GAS` (150k) + `SWEEP_CALL_GAS` (40k) + the measured new-account charge for an empty safe + Σ(stipend + stipend/63 + 6k overhead + calldata at 16 gas/byte). The stipend/63 term is what makes EIP-150 forward the full stipend.
+- **Whole-transaction estimate, raise-only:** each batch's gas limit is max(budget, `eth_estimateGas` × 1.5), capped at 2^24. The first batch is estimated as a type-4 call with its authorization; later batches with a state override giving the victim the delegation code. An estimate is never used alone: a starved action inside `tryCall` doesn't revert the transaction, so the node's estimator can't see it. If an estimate fails (an RPC without type-4 or override support), the batch keeps its budget and the CLI warns.
+- **Probe (ERC-20 + ERC-721, singleton deployed):** budget 668k vs estimate 146k on Osaka, 861k vs 435k on Amsterdam; both actions succeeded at the bare estimate. The budget normally dominates; the estimate covers a fork repricing the fixed overhead.
 - `ActionResult` reports the call's success flag only.
+
+## 9. EthRescue singleton (EIP-712 requests)
+
+`EthRescue` has no constructor arguments or storage (OpenZeppelin's EIP712 adds immutables). One deployment per network serves every rescue: the victim's 7702 authorization points at it, and each `rescue()` call carries a request signed by the victim key.
+
+```solidity
+struct Action { address target; uint256 gasStipend; bytes data; }
+struct RescueRequest { address rescuer; address safe; uint256 deadline; bytes32 actionsHash; }
+
+function rescue(RescueRequest calldata request, Action[] calldata actions, bytes calldata signature) external;
+```
+
+- **EIP-712 domain:** inherits OpenZeppelin `EIP712("EthRescue", "1")`, so the domain is `block.chainid` plus `verifyingContract = address(this)`. Inside a delegated call that is the victim, so a signature can't be replayed on another account, chain or the implementation. OZ uses its cached separator only when `address(this)` is the singleton, so under delegation it rebuilds per call. The name and version are short strings, so OZ's storage fallbacks (which would read the victim's possibly dirty storage) are never used. ERC-5267 `eip712Domain()` reports the victim as the verifying contract.
+- **Checks, in order:** `msg.sender == rescuer`, `block.timestamp <= deadline`, the safe is not zero, the rescuer or the victim, `keccak256(abi.encode(actions)) == actionsHash`, and OpenZeppelin `ECDSA.recoverCalldata` equals `address(this)`. Malformed, wrong-length and high-s signatures revert with OpenZeppelin's `ECDSAInvalidSignature*` errors; a valid signature from another key reverts with `InvalidSignature`. Then action-shape validation (non-zero target that isn't the victim, non-zero stipend) before any call, the action loop and the sweep.
+- **No nonce.** A request can only be replayed by its own rescuer, to its own safe, before its deadline, so replay only repeats the signed rescue. Avoiding storage also avoids EIP-8037 state gas in the victim's account.
+- **No gas parameters.** Gas repricing in a fork changes only the CLI's budget constants, never the contract.
+- **`required` is gone.** The client never set it: every action is optional, so a race can't revert the bundle.
+- **Deployment:** the maintainer deploys `EthRescue` on each supported network and pins the address as `eth_rescue` in `src/eth_rescue/networks.py`. The CLI doesn't embed bytecode and never deploys. It refuses to run on a network whose `eth_rescue` is unset, and refuses (exit 1) if the pinned address has no code. Rebuilding the contract doesn't move a deployed address; shipping a new version means deploying it and updating the pin.
+- **Client:** one request per batch, signed with eth-account's EIP-712 implementation, rescuer = gas wallet, deadline = latest block timestamp + 10 minutes (each retry window rebuilds and re-signs).
+- **Tests:** integration fixtures deploy `EthRescue` from the forge artifact (`contracts/out`) and pass that address as the context's `rescue_contract`.

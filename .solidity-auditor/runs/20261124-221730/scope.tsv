@@ -1,5 +1,0 @@
-name	eth-rescue
-mode	filename
-files	contracts/src/EthRescue.sol
-passes_planned	1
-pass_1_agents	12/12

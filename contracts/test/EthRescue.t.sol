@@ -6,6 +6,7 @@ import {ERC20} from "solady-0.1.26/tokens/ERC20.sol";
 import {ERC721} from "solady-0.1.26/tokens/ERC721.sol";
 import {ERC1155} from "solady-0.1.26/tokens/ERC1155.sol";
 import {EthRescue} from "src/EthRescue.sol";
+import {ECDSA} from "@openzeppelin-contracts-5.6.1/utils/cryptography/ECDSA.sol";
 
 contract CallRecorder {
     address public caller;
@@ -77,9 +78,16 @@ contract RejectingSafe {
 contract ReentrantTarget {
     bytes4 public revertSelector;
 
+    /// @dev Names itself as rescuer to get past the sender check; the missing victim signature must stop it.
     function attemptRescue() external {
         EthRescue.Action[] memory actions = new EthRescue.Action[](0);
-        try EthRescue(payable(msg.sender)).rescue(actions) {}
+        EthRescue.RescueRequest memory request = EthRescue.RescueRequest({
+            rescuer: address(this),
+            safe: address(0xdead),
+            deadline: block.timestamp,
+            actionsHash: keccak256(abi.encode(actions))
+        });
+        try EthRescue(payable(msg.sender)).rescue(request, actions, "") {}
         catch (bytes memory reason) {
             if (reason.length >= 4) {
                 bytes4 selector;
@@ -149,6 +157,8 @@ contract FixtureOwnable {
 
 contract EthRescueTest is Test {
     uint256 private constant VICTIM_KEY = 0xA11CE;
+    uint256 private constant OTHER_KEY = 0xB0B;
+    uint256 private constant SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
 
     address private victim;
     address private rescuer;
@@ -160,34 +170,225 @@ contract EthRescueTest is Test {
         victim = vm.addr(VICTIM_KEY);
         rescuer = makeAddr("rescuer");
         safe = makeAddr("safe");
-        implementation = new EthRescue(rescuer, safe);
+        implementation = new EthRescue();
         delegated = EthRescue(payable(victim));
-        _attachDelegation();
+        vm.signAndAttachDelegation(address(implementation), VICTIM_KEY);
+        _rescue(_emptyActions());
     }
 
-    function testConstructorStoresImmutableConfiguration() public view {
-        assertEq(implementation.RESCUER(), rescuer);
-        assertEq(implementation.SAFE(), safe);
-        assertEq(delegated.RESCUER(), rescuer);
-        assertEq(delegated.SAFE(), safe);
+    // ---------------------------------------------------------------
+    // Singleton and EIP-712
+    // ---------------------------------------------------------------
+
+    function testDigestMatchesEip712Encoding() public view {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+
+        assertEq(delegated.rescueRequestDigest(request), _digest(victim, request));
     }
 
-    function testConstructorRejectsInvalidAddresses() public {
-        vm.expectRevert(EthRescue.InvalidRescuer.selector);
-        new EthRescue(address(0), safe);
+    function testDigestTracksChainIdAfterDeployment() public {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        vm.chainId(vm.getChainId() + 1);
 
-        vm.expectRevert(EthRescue.InvalidSafe.selector);
-        new EthRescue(rescuer, address(0));
-
-        vm.expectRevert(EthRescue.InvalidSafe.selector);
-        new EthRescue(rescuer, rescuer);
+        assertEq(delegated.rescueRequestDigest(request), _digest(victim, request));
     }
+
+    function testEip712DomainReportsDelegatingAccount() public view {
+        (bytes1 fields, string memory name, string memory version, uint256 chainId, address verifyingContract,,) =
+            delegated.eip712Domain();
+
+        assertEq(fields, hex"0f");
+        assertEq(name, "EthRescue");
+        assertEq(version, "1");
+        assertEq(chainId, block.chainid);
+        assertEq(verifyingContract, victim);
+    }
+
+    function testDomainIgnoresLeftoverStorageInDelegatingAccount() public {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        for (uint256 slot; slot < 8; ++slot) {
+            vm.store(victim, bytes32(slot), bytes32(type(uint256).max));
+        }
+
+        assertEq(delegated.rescueRequestDigest(request), _digest(victim, request));
+        (, string memory name,,,,,) = delegated.eip712Domain();
+        assertEq(name, "EthRescue");
+    }
+
+    function testDomainIsBoundToDelegatingAccount() public view {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+
+        assertNotEq(implementation.rescueRequestDigest(request), delegated.rescueRequestDigest(request));
+    }
+
+    function testOnlyBoundRescuerCanSubmit(address hacker) public {
+        vm.assume(hacker != rescuer);
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        bytes memory signature = _sign(VICTIM_KEY, victim, request);
+
+        vm.prank(hacker);
+        vm.expectRevert(EthRescue.NotRescuer.selector);
+        delegated.rescue(request, _emptyActions(), signature);
+    }
+
+    function testRejectsSignatureFromAnotherKey() public {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+
+        vm.expectRevert(EthRescue.InvalidSignature.selector);
+        _submit(request, _emptyActions(), _sign(OTHER_KEY, victim, request));
+    }
+
+    function testRejectsSignatureForAnotherDelegatedAccount() public {
+        address other = vm.addr(OTHER_KEY);
+        vm.signAndAttachDelegation(address(implementation), OTHER_KEY);
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        bytes memory otherSignature = _sign(OTHER_KEY, other, request);
+
+        vm.expectRevert(EthRescue.InvalidSignature.selector);
+        _submit(request, _emptyActions(), otherSignature);
+    }
+
+    function testRejectsSignatureFromAnotherChain() public {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        bytes memory signature = _sign(VICTIM_KEY, victim, request);
+        vm.chainId(vm.getChainId() + 1);
+
+        vm.expectRevert(EthRescue.InvalidSignature.selector);
+        _submit(request, _emptyActions(), signature);
+    }
+
+    function testRejectsSignatureOnImplementation() public {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        bytes memory signature = _sign(VICTIM_KEY, address(implementation), request);
+
+        vm.prank(rescuer);
+        vm.expectRevert(EthRescue.InvalidSignature.selector);
+        implementation.rescue(request, _emptyActions(), signature);
+    }
+
+    function testRejectsHighSAndMalformedSignatures() public {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(VICTIM_KEY, _digest(victim, request));
+        bytes32 highS = bytes32(SECP256K1_N - uint256(s));
+
+        vm.expectRevert(abi.encodeWithSelector(ECDSA.ECDSAInvalidSignatureS.selector, highS));
+        _submit(request, _emptyActions(), abi.encodePacked(r, highS, v == 27 ? uint8(28) : uint8(27)));
+
+        vm.expectRevert(abi.encodeWithSelector(ECDSA.ECDSAInvalidSignatureLength.selector, 0));
+        _submit(request, _emptyActions(), "");
+
+        vm.expectRevert(abi.encodeWithSelector(ECDSA.ECDSAInvalidSignatureLength.selector, 64));
+        _submit(request, _emptyActions(), abi.encodePacked(r, s));
+
+        vm.expectRevert(ECDSA.ECDSAInvalidSignature.selector);
+        _submit(request, _emptyActions(), abi.encodePacked(bytes32(0), bytes32(0), uint8(27)));
+    }
+
+    function testRejectsExpiredRequest() public {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        vm.warp(request.deadline + 1);
+
+        vm.expectRevert(EthRescue.Expired.selector);
+        _submit(request, _emptyActions());
+    }
+
+    function testAcceptsRequestAtDeadline() public {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        vm.warp(request.deadline);
+        vm.deal(victim, 1 ether);
+
+        _submit(request, _emptyActions());
+
+        assertEq(safe.balance, 1 ether);
+    }
+
+    function testRejectsActionsOtherThanSigned() public {
+        CallRecorder recorder = new CallRecorder();
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+
+        vm.expectRevert(EthRescue.ActionsMismatch.selector);
+        _submit(request, _singleAction(address(recorder), 100_000, abi.encodeCall(recorder.record, ())));
+    }
+
+    function testRejectsSafeOtherThanSigned() public {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        bytes memory signature = _sign(VICTIM_KEY, victim, request);
+        request.safe = makeAddr("attacker-safe");
+
+        vm.expectRevert(EthRescue.InvalidSignature.selector);
+        _submit(request, _emptyActions(), signature);
+    }
+
+    function testRejectsInvalidSafe() public {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        address[3] memory invalid = [address(0), rescuer, victim];
+        for (uint256 i; i < invalid.length; ++i) {
+            request.safe = invalid[i];
+            vm.expectRevert(EthRescue.InvalidSafe.selector);
+            _submit(request, _emptyActions());
+        }
+    }
+
+    function testReplayBeforeDeadlineOnlyRepeatsTheSignedSweep() public {
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        bytes memory signature = _sign(VICTIM_KEY, victim, request);
+
+        vm.deal(victim, 1 ether);
+        _submit(request, _emptyActions(), signature);
+        vm.deal(victim, 2 ether);
+        _submit(request, _emptyActions(), signature);
+
+        assertEq(safe.balance, 3 ether);
+    }
+
+    function testTargetCannotReenterRescue() public {
+        ReentrantTarget target = new ReentrantTarget();
+
+        _rescue(_singleAction(address(target), 200_000, abi.encodeCall(target.attemptRescue, ())));
+
+        assertEq(target.revertSelector(), ECDSA.ECDSAInvalidSignatureLength.selector);
+    }
+
+    // ---------------------------------------------------------------
+    // Gas
+    // ---------------------------------------------------------------
+
+    function testGasBurningTargetCannotBlockLaterAction() public {
+        GasBurningTarget burner = new GasBurningTarget();
+        CallRecorder recorder = new CallRecorder();
+        EthRescue.Action[] memory actions = new EthRescue.Action[](2);
+        actions[0] = _action(address(burner), 30_000, abi.encodeCall(burner.burn, ()));
+        actions[1] = _action(address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
+        EthRescue.RescueRequest memory request = _request(actions);
+        bytes memory signature = _sign(VICTIM_KEY, victim, request);
+
+        vm.prank(rescuer);
+        delegated.rescue{gas: 500_000}(request, actions, signature);
+
+        assertEq(recorder.calls(), 1);
+    }
+
+    function testReturnDataBombCannotBlockLaterAction() public {
+        ReturnDataBomb bomb = new ReturnDataBomb();
+        CallRecorder recorder = new CallRecorder();
+        EthRescue.Action[] memory actions = new EthRescue.Action[](2);
+        actions[0] = _action(address(bomb), 1_000_000, abi.encodeCall(bomb.explode, ()));
+        actions[1] = _action(address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
+
+        _rescue(actions);
+
+        assertEq(recorder.calls(), 1);
+    }
+
+    // ---------------------------------------------------------------
+    // Actions and sweep
+    // ---------------------------------------------------------------
 
     function testSupportsTokenReceiverInterfaces() public view {
         assertTrue(delegated.supportsInterface(0x01ffc9a7)); // ERC165
         assertTrue(delegated.supportsInterface(0x150b7a02)); // ERC721Receiver
         assertTrue(delegated.supportsInterface(0x4e2312e0)); // ERC1155Receiver
-        assertFalse(delegated.supportsInterface(0xffffffff)); 
+        assertFalse(delegated.supportsInterface(0xffffffff));
     }
 
     function testDelegatedVictimReceivesSafeTransferredTokens() public {
@@ -220,18 +421,10 @@ contract EthRescueTest is Test {
         assertEq(erc1155.balanceOf(victim, 3), 5);
     }
 
-    function testOnlyRescuerCanExecute(address hacker) public {
-        vm.assume(hacker != rescuer);
-
-        vm.prank(hacker);
-        vm.expectRevert(EthRescue.NotAllowed.selector);
-        delegated.rescue(_emptyActions());
-    }
-
     function testActionCallsOriginateFromVictim() public {
         CallRecorder target = new CallRecorder();
 
-        _rescue(_singleAction(false, address(target), 100_000, abi.encodeCall(target.record, ())));
+        _rescue(_singleAction(address(target), 100_000, abi.encodeCall(target.record, ())));
 
         assertEq(target.caller(), victim);
         assertEq(target.calls(), 1);
@@ -247,12 +440,11 @@ contract EthRescueTest is Test {
         erc1155.mint(victim, 1, 25);
 
         EthRescue.Action[] memory actions = new EthRescue.Action[](4);
-        actions[0] = _action(false, address(erc20), 100_000, abi.encodeCall(erc20.transfer, (safe, 1_000)));
-        actions[1] = _action(false, address(erc721), 100_000, abi.encodeCall(erc721.transferFrom, (victim, safe, 1)));
-        actions[2] = _action(
-            false, address(erc1155), 150_000, abi.encodeCall(erc1155.safeTransferFrom, (victim, safe, 1, 25, ""))
-        );
-        actions[3] = _action(false, address(ownable), 100_000, abi.encodeCall(ownable.transferOwnership, (safe)));
+        actions[0] = _action(address(erc20), 100_000, abi.encodeCall(erc20.transfer, (safe, 1_000)));
+        actions[1] = _action(address(erc721), 100_000, abi.encodeCall(erc721.transferFrom, (victim, safe, 1)));
+        actions[2] =
+            _action(address(erc1155), 150_000, abi.encodeCall(erc1155.safeTransferFrom, (victim, safe, 1, 25, "")));
+        actions[3] = _action(address(ownable), 100_000, abi.encodeCall(ownable.transferOwnership, (safe)));
 
         _rescue(actions);
 
@@ -264,12 +456,12 @@ contract EthRescueTest is Test {
         assertEq(ownable.owner(), safe);
     }
 
-    function testOptionalFailureContinues() public {
+    function testRevertingActionDoesNotStopLaterActions() public {
         RevertingTarget revertingTarget = new RevertingTarget();
         CallRecorder recorder = new CallRecorder();
         EthRescue.Action[] memory actions = new EthRescue.Action[](2);
-        actions[0] = _action(false, address(revertingTarget), 100_000, abi.encodeCall(revertingTarget.fail, ()));
-        actions[1] = _action(false, address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
+        actions[0] = _action(address(revertingTarget), 100_000, abi.encodeCall(revertingTarget.fail, ()));
+        actions[1] = _action(address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
 
         _rescue(actions);
 
@@ -278,86 +470,29 @@ contract EthRescueTest is Test {
 
     function testEmitsActionResultPerAction() public {
         RevertingTarget revertingTarget = new RevertingTarget();
-        CallRecorder recorder = new CallRecorder();
-        EthRescue.Action[] memory actions = new EthRescue.Action[](2);
-        actions[0] = _action(false, address(revertingTarget), 100_000, abi.encodeCall(revertingTarget.fail, ()));
-        actions[1] = _action(false, address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
+        FalseReturningTarget falseReturning = new FalseReturningTarget();
+        NoReturnTarget noReturn = new NoReturnTarget();
+        EthRescue.Action[] memory actions = new EthRescue.Action[](3);
+        actions[0] = _action(address(revertingTarget), 100_000, abi.encodeCall(revertingTarget.fail, ()));
+        actions[1] = _action(address(falseReturning), 100_000, abi.encodeCall(falseReturning.returnFalse, ()));
+        actions[2] = _action(address(noReturn), 100_000, abi.encodeCall(noReturn.run, ()));
 
         vm.expectEmit(true, false, false, true, victim);
         emit EthRescue.ActionResult(0, false);
         vm.expectEmit(true, false, false, true, victim);
-        emit EthRescue.ActionResult(1, true);
-        _rescue(actions);
-    }
-
-    function testRequiredFailureRevertsActionsAndSweep() public {
-        CallRecorder recorder = new CallRecorder();
-        RevertingTarget revertingTarget = new RevertingTarget();
-        EthRescue.Action[] memory actions = new EthRescue.Action[](2);
-        actions[0] = _action(false, address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
-        actions[1] = _action(true, address(revertingTarget), 100_000, abi.encodeCall(revertingTarget.fail, ()));
-        vm.deal(victim, 1 ether);
-
-        vm.expectRevert(abi.encodeWithSelector(EthRescue.RequiredActionFailed.selector, 1));
+        emit EthRescue.ActionResult(1, true); // EVM success only; protocol failure is the client's state check
+        vm.expectEmit(true, false, false, true, victim);
+        emit EthRescue.ActionResult(2, true);
         _rescue(actions);
 
-        assertEq(recorder.calls(), 0);
-        assertEq(victim.balance, 1 ether);
-        assertEq(safe.balance, 0);
-    }
-
-    function testRequiredFalseReturnCountsAsEvmSuccess() public {
-        FalseReturningTarget target = new FalseReturningTarget();
-
-        _rescue(_singleAction(true, address(target), 100_000, abi.encodeCall(target.returnFalse, ())));
-    }
-
-    function testNoReturnCountsAsEvmSuccess() public {
-        NoReturnTarget target = new NoReturnTarget();
-
-        _rescue(_singleAction(true, address(target), 100_000, abi.encodeCall(target.run, ())));
-
-        assertEq(target.calls(), 1);
-    }
-
-    function testGasBurningTargetCannotBlockLaterAction() public {
-        GasBurningTarget burner = new GasBurningTarget();
-        CallRecorder recorder = new CallRecorder();
-        EthRescue.Action[] memory actions = new EthRescue.Action[](2);
-        actions[0] = _action(false, address(burner), 30_000, abi.encodeCall(burner.burn, ()));
-        actions[1] = _action(false, address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
-
-        vm.prank(rescuer);
-        delegated.rescue{gas: 500_000}(actions);
-
-        assertEq(recorder.calls(), 1); // first call fails
-    }
-
-    function testReturnDataBombCannotBlockLaterAction() public {
-        ReturnDataBomb bomb = new ReturnDataBomb();
-        CallRecorder recorder = new CallRecorder();
-        EthRescue.Action[] memory actions = new EthRescue.Action[](2);
-        actions[0] = _action(false, address(bomb), 1_000_000, abi.encodeCall(bomb.explode, ()));
-        actions[1] = _action(false, address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
-
-        _rescue(actions);
-
-        assertEq(recorder.calls(), 1); // first call fails
-    }
-
-    function testTargetCannotReenterRescue() public {
-        ReentrantTarget target = new ReentrantTarget();
-
-        _rescue(_singleAction(false, address(target), 200_000, abi.encodeCall(target.attemptRescue, ())));
-
-        assertEq(target.revertSelector(), EthRescue.NotAllowed.selector);
+        assertEq(noReturn.calls(), 1);
     }
 
     function testInvalidActionShapesRevertBeforeExecution() public {
         CallRecorder recorder = new CallRecorder();
         EthRescue.Action[] memory actions = new EthRescue.Action[](2);
-        actions[0] = _action(false, address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
-        actions[1] = _action(false, address(0), 100_000, "");
+        actions[0] = _action(address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
+        actions[1] = _action(address(0), 100_000, "");
 
         vm.expectRevert(abi.encodeWithSelector(EthRescue.InvalidAction.selector, 1));
         _rescue(actions);
@@ -370,13 +505,15 @@ contract EthRescueTest is Test {
         actions[1].gasStipend = 0;
         vm.expectRevert(abi.encodeWithSelector(EthRescue.InvalidAction.selector, 1));
         _rescue(actions);
+
+        assertEq(recorder.calls(), 0);
     }
 
     function testVictimAcceptsRefundAndSweepsItAfterActions() public {
         RefundTarget target = new RefundTarget();
         vm.deal(address(target), 2 ether);
 
-        _rescue(_singleAction(false, address(target), 200_000, abi.encodeCall(target.refund, ())));
+        _rescue(_singleAction(address(target), 200_000, abi.encodeCall(target.refund, ())));
 
         assertEq(target.caller(), victim);
         assertEq(victim.balance, 0);
@@ -397,41 +534,21 @@ contract EthRescueTest is Test {
     }
 
     function testZeroBalanceDoesNotCallRejectingSafe() public {
-        RejectingSafe rejectingSafe = new RejectingSafe();
-        EthRescue rescue = new EthRescue(rescuer, address(rejectingSafe));
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        request.safe = address(new RejectingSafe());
 
-        vm.prank(rescuer);
-        rescue.rescue(_emptyActions());
+        _submit(request, _emptyActions());
     }
 
     function testRejectingSafeRevertsPositiveSweep() public {
-        RejectingSafe rejectingSafe = new RejectingSafe();
-        EthRescue rescue = new EthRescue(rescuer, address(rejectingSafe));
-        vm.deal(address(rescue), 1 ether);
+        EthRescue.RescueRequest memory request = _request(_emptyActions());
+        request.safe = address(new RejectingSafe());
+        vm.deal(victim, 1 ether);
 
         vm.expectRevert(EthRescue.EthTransferFailed.selector);
-        vm.prank(rescuer);
-        rescue.rescue(_emptyActions());
+        _submit(request, _emptyActions());
 
-        assertEq(address(rescue).balance, 1 ether);
-    }
-
-    function testRepeatedBatchesSweepAfterEveryCall() public {
-        vm.deal(victim, 1 ether);
-        _rescue(_emptyActions());
-        assertEq(safe.balance, 1 ether);
-
-        vm.deal(victim, 2 ether);
-        _rescue(_emptyActions());
-        assertEq(safe.balance, 3 ether);
-    }
-
-    function testRuntimeCodeHashDependsOnImmutableConfiguration() public {
-        EthRescue sameConfiguration = new EthRescue(rescuer, safe);
-        EthRescue differentSafe = new EthRescue(rescuer, makeAddr("different-safe"));
-
-        assertEq(address(implementation).codehash, address(sameConfiguration).codehash);
-        assertNotEq(address(implementation).codehash, address(differentSafe).codehash);
+        assertEq(victim.balance, 1 ether);
     }
 
     function testFuzzSweepsFullBalance(uint96 amount) public {
@@ -448,7 +565,7 @@ contract EthRescueTest is Test {
         CallRecorder recorder = new CallRecorder();
         EthRescue.Action[] memory actions = new EthRescue.Action[](count);
         for (uint256 i; i < count; ++i) {
-            actions[i] = _action(true, address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
+            actions[i] = _action(address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
         }
 
         _rescue(actions);
@@ -456,34 +573,84 @@ contract EthRescueTest is Test {
         assertEq(recorder.calls(), count);
     }
 
-    function _attachDelegation() private {
-        vm.signAndAttachDelegation(address(implementation), VICTIM_KEY);
-        _rescue(_emptyActions());
-    }
+    // ---------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------
 
     function _rescue(EthRescue.Action[] memory actions) private {
-        vm.prank(rescuer);
-        delegated.rescue(actions);
+        _submit(_request(actions), actions);
+    }
+
+    function _submit(EthRescue.RescueRequest memory request, EthRescue.Action[] memory actions) private {
+        _submit(request, actions, _sign(VICTIM_KEY, victim, request));
+    }
+
+    function _submit(EthRescue.RescueRequest memory request, EthRescue.Action[] memory actions, bytes memory signature)
+        private
+    {
+        vm.prank(request.rescuer);
+        delegated.rescue(request, actions, signature);
+    }
+
+    function _request(EthRescue.Action[] memory actions) private view returns (EthRescue.RescueRequest memory) {
+        return EthRescue.RescueRequest({
+            rescuer: rescuer,
+            safe: safe,
+            deadline: block.timestamp + 1 hours,
+            actionsHash: keccak256(abi.encode(actions))
+        });
+    }
+
+    /// @dev Independent of the contract so tests can sign without making a call that `expectRevert` would catch.
+    function _digest(address account, EthRescue.RescueRequest memory request) private view returns (bytes32) {
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256("EthRescue"),
+                keccak256("1"),
+                vm.getChainId(),
+                account
+            )
+        );
+        bytes32 structHash = keccak256(
+            abi.encode(
+                keccak256("RescueRequest(address rescuer,address safe,uint256 deadline,bytes32 actionsHash)"),
+                request.rescuer,
+                request.safe,
+                request.deadline,
+                request.actionsHash
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+    }
+
+    function _sign(uint256 key, address account, EthRescue.RescueRequest memory request)
+        private
+        view
+        returns (bytes memory)
+    {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(key, _digest(account, request));
+        return abi.encodePacked(r, s, v);
     }
 
     function _emptyActions() private pure returns (EthRescue.Action[] memory) {
         return new EthRescue.Action[](0);
     }
 
-    function _singleAction(bool required, address target, uint256 gasStipend, bytes memory data)
+    function _singleAction(address target, uint256 gasStipend, bytes memory data)
         private
         pure
         returns (EthRescue.Action[] memory actions)
     {
         actions = new EthRescue.Action[](1);
-        actions[0] = _action(required, target, gasStipend, data);
+        actions[0] = _action(target, gasStipend, data);
     }
 
-    function _action(bool required, address target, uint256 gasStipend, bytes memory data)
+    function _action(address target, uint256 gasStipend, bytes memory data)
         private
         pure
         returns (EthRescue.Action memory)
     {
-        return EthRescue.Action({required: required, target: target, gasStipend: gasStipend, data: data});
+        return EthRescue.Action({target: target, gasStipend: gasStipend, data: data});
     }
 }

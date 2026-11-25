@@ -1,13 +1,18 @@
 import argparse
 import getpass
 import sys
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from eth_utils import to_hex
 
 from eth_rescue import engine, ui
+from eth_rescue.bundle import (
+    DEFAULT_GAS_MULTIPLIER,
+    MAX_GAS_MULTIPLIER,
+    MIN_GAS_MULTIPLIER,
+)
 from eth_rescue.engine import ExitCode, RescueContext
 from eth_rescue.networks import NETWORKS, connect
 from eth_rescue.plan import Plan, PlanError, expand, load_plan, render_schema
@@ -52,6 +57,20 @@ def _new_gas_wallet(_: argparse.Namespace) -> int:
     return ExitCode.OK
 
 
+def gas_multiplier(value: str) -> Decimal:
+    try:
+        multiplier = Decimal(value)
+    except InvalidOperation as e:
+        raise argparse.ArgumentTypeError(f"not a number: {value!r}") from e
+    if not multiplier.is_finite() or not (
+        MIN_GAS_MULTIPLIER <= multiplier <= MAX_GAS_MULTIPLIER
+    ):
+        raise argparse.ArgumentTypeError(
+            f"must be between {MIN_GAS_MULTIPLIER} and {MAX_GAS_MULTIPLIER}"
+        )
+    return multiplier
+
+
 def _read_key(label: str) -> LocalAccount:
     raw = getpass.getpass(f"{label} private key (hidden): ").strip()
     try:
@@ -93,6 +112,8 @@ def _context(
 ) -> tuple[Plan, RescueContext]:
     plan = load_plan(args.plan)
     network = NETWORKS[plan.network]
+    if network["eth_rescue"] is None:
+        raise CliError(f"EthRescue is not deployed on {network['label']} yet")
     w3 = connect(network, Account.create(), rpc=args.rpc)
     reporter.message("info", f"Connected to {network['label']}.")
     victim, gas = read_accounts(plan)
@@ -102,7 +123,9 @@ def _context(
         gas=gas,
         safe=plan.safe,
         reporter=reporter,
+        rescue_contract=network["eth_rescue"],
         extra_priority_fee_gwei=Decimal(plan.options.priority_fee_gwei),
+        gas_multiplier=args.gas_multiplier,
         max_blocks=plan.options.max_blocks,
         funding_timeout=args.funding_timeout,
     )
@@ -139,6 +162,17 @@ def _add_rescue_arguments(parser: argparse.ArgumentParser) -> None:
         default=engine.DEFAULT_FUNDING_TIMEOUT,
         metavar="SECONDS",
         help="how long to wait for the gas wallet to be funded (default: 1800)",
+    )
+    parser.add_argument(
+        "--gas-multiplier",
+        type=gas_multiplier,
+        default=DEFAULT_GAS_MULTIPLIER,
+        metavar="X",
+        help=(
+            "multiply each action's live gas estimate by X "
+            f"(default: {DEFAULT_GAS_MULTIPLIER}; {MIN_GAS_MULTIPLIER}-"
+            f"{MAX_GAS_MULTIPLIER}). The plan's gas is always the minimum"
+        ),
     )
     parser.set_defaults(handler=_rescue)
 

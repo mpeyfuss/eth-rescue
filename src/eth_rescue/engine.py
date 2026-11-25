@@ -1,4 +1,5 @@
 import time
+from functools import partial
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -16,9 +17,10 @@ from eth_rescue.bundle import (
     prepare_actions,
     prepare_bundle,
     size_actions,
+    DEFAULT_GAS_MULTIPLIER,
 )
 from eth_rescue.checks import evaluate_checks, infer_checks, snapshot_checks
-from eth_rescue.contract import ACTION_RESULT_TOPIC
+from eth_rescue.contract import ACTION_RESULT_TOPIC, require_rescue_contract
 from eth_rescue.relay import SECONDS_PER_BLOCK, RelayWeb3
 from eth_rescue.report import Reporter
 from eth_rescue.types import (
@@ -51,7 +53,9 @@ class RescueContext:
     gas: LocalAccount
     safe: str
     reporter: Reporter
+    rescue_contract: str
     extra_priority_fee_gwei: Decimal = Decimal(0)
+    gas_multiplier: Decimal = DEFAULT_GAS_MULTIPLIER
     max_blocks: int = DEFAULT_MAX_BLOCKS
     funding_timeout: float = DEFAULT_FUNDING_TIMEOUT
     poll_interval: float = SECONDS_PER_BLOCK
@@ -250,6 +254,8 @@ def _fund_and_simulate(
         ctx.reporter.message("error", f"Could not prepare bundle: {e}")
         return ExitCode.SIMULATION_FAILED
     ctx.reporter.bundle(bundle)
+    for warning in bundle.warnings:
+        ctx.reporter.message("warning", warning)
     if not simulate_prepared_bundle(ctx, bundle):
         ctx.reporter.message("error", "Nothing was sent.")
         return ExitCode.SIMULATION_FAILED
@@ -276,7 +282,9 @@ def sized_actions(
 ) -> list[PreparedAction]:
     """Encode actions and raise their gas limits to live estimates."""
     floors = prepare_actions(rescue_data)
-    prepared, failures = size_actions(ctx.w3, ctx.victim.address, floors)
+    prepared, failures = size_actions(
+        ctx.w3, ctx.victim.address, floors, ctx.gas_multiplier
+    )
     for index, (floor, action) in enumerate(zip(floors, prepared)):
         if index in failures:
             ctx.reporter.message(
@@ -327,11 +335,16 @@ def _execute_phase(
 def _preflight(ctx: RescueContext, rescue_data: list[RescueData]) -> bool:
     try:
         has_7702_delegation(ctx.w3, ctx.victim.address)
+        require_rescue_contract(ctx.w3, ctx.rescue_contract)
         prepare_actions(rescue_data)
     except ValueError as e:
         ctx.reporter.message("error", str(e))
         return False
     return True
+
+
+def _rescue_7702(ctx: RescueContext) -> BundlePreparer:
+    return partial(prepare_7702_bundle, rescue_contract=ctx.rescue_contract)
 
 
 def simulate(ctx: RescueContext, rescue_data: list[RescueData]) -> ExitCode:
@@ -340,7 +353,7 @@ def simulate(ctx: RescueContext, rescue_data: list[RescueData]) -> ExitCode:
         return ExitCode.INVALID
     ctx.reporter.plan(rescue_data)
     failure = _fund_and_simulate(
-        ctx, sized_actions(ctx, rescue_data), prepare_7702_bundle
+        ctx, sized_actions(ctx, rescue_data), _rescue_7702(ctx)
     )
     return failure or ExitCode.OK
 
@@ -364,7 +377,7 @@ def run(
     prepared = sized_actions(ctx, rescue_data)
 
     ctx.reporter.phase("Phase 1: EIP-7702 rescue")
-    outcomes = _execute_phase(ctx, rescue_data, prepared, prepare_7702_bundle, confirm)
+    outcomes = _execute_phase(ctx, rescue_data, prepared, _rescue_7702(ctx), confirm)
     if isinstance(outcomes, ExitCode):
         return outcomes
     failed = _failed(outcomes)

@@ -22,3 +22,5 @@ web/node_modules
 
 # Secrets
 .env
+.env.local
+.env.*.local

@@ -1,18 +1,39 @@
+import {
+  type Announcements,
+  closestCenter,
+  DndContext,
+  type DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { useState } from "react";
+import { BUILT_IN_KEY, loadUserKey } from "../discovery/key";
+import { addressProblem, sameAddress } from "../plan/address";
 import { tryParseSignature } from "../plan/custom";
 import {
   ACTION_SPECS,
   ACTION_TYPES,
   type ActionType,
+  type Draft,
   type DraftAction,
   type DraftEvent,
+  type Network,
 } from "../plan/draft";
 import { TextField } from "./Field";
 
 type ErrorFor = (path: string, value: string) => string | undefined;
 
 interface Props {
-  actions: DraftAction[];
+  draft: Draft;
   dispatch: (event: DraftEvent) => void;
   errorFor: ErrorFor;
 }
@@ -40,26 +61,64 @@ const TYPE_NOTES: Partial<Record<ActionType, string>> = {
 const ADDRESS_FIELDS = new Set(["contract", "auction_house", "target"]);
 const GAS_HINT = "Minimum gas; the CLI raises it from a live estimate.";
 
-export function ActionsSection({ actions, dispatch, errorFor }: Props) {
+function actionName(action: DraftAction): string {
+  const label = action.label.trim();
+  return label ? `${ACTION_SPECS[action.type].label} · ${label}` : ACTION_SPECS[action.type].label;
+}
+
+export function ActionsSection({ draft, dispatch, errorFor }: Props) {
   const [nextType, setNextType] = useState<ActionType>("erc20");
+  const { actions } = draft;
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  const position = (id: string | number) => actions.findIndex((action) => action.id === id) + 1;
+  const name = (id: string | number) => {
+    const action = actions.find((candidate) => candidate.id === id);
+    return action ? actionName(action) : "action";
+  };
+  const announcements: Announcements = {
+    onDragStart: ({ active }) => `Picked up ${name(active.id)} at position ${position(active.id)}.`,
+    onDragOver: ({ active, over }) => (over ? `${name(active.id)} is over position ${position(over.id)}.` : undefined),
+    onDragEnd: ({ active, over }) =>
+      over ? `${name(active.id)} dropped at position ${position(over.id)}.` : `${name(active.id)} dropped.`,
+    onDragCancel: ({ active }) => `Moving ${name(active.id)} was cancelled.`,
+  };
+
+  function onDragEnd({ active, over }: DragEndEvent) {
+    if (over && active.id !== over.id) dispatch({ kind: "reorder", id: String(active.id), overId: String(over.id) });
+  }
 
   return (
     <section className="card">
-      <h2>2. Assets to rescue</h2>
+      <h2>3. Assets to rescue</h2>
       <p className="muted">Actions run in this order. Destinations are always the safe wallet.</p>
       {actions.length === 0 && <p className="empty">No actions yet.</p>}
-      <ol className="actions">
-        {actions.map((action, index) => (
-          <ActionCard
-            key={action.id}
-            action={action}
-            index={index}
-            count={actions.length}
-            dispatch={dispatch}
-            errorFor={errorFor}
-          />
-        ))}
-      </ol>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={onDragEnd}
+        accessibility={{ announcements }}
+      >
+        <SortableContext items={actions.map((action) => action.id)} strategy={verticalListSortingStrategy}>
+          <ol className="actions">
+            {actions.map((action, index) => (
+              <ActionCard
+                key={action.id}
+                action={action}
+                index={index}
+                count={actions.length}
+                dispatch={dispatch}
+                errorFor={errorFor}
+                network={draft.network}
+                victim={draft.victim}
+              />
+            ))}
+          </ol>
+        </SortableContext>
+      </DndContext>
       <div className="add-action">
         <select
           aria-label="Action type"
@@ -81,6 +140,8 @@ export function ActionsSection({ actions, dispatch, errorFor }: Props) {
 }
 
 interface CardProps {
+  network: Network;
+  victim: string;
   action: DraftAction;
   index: number;
   count: number;
@@ -88,18 +149,34 @@ interface CardProps {
   errorFor: ErrorFor;
 }
 
-function ActionCard({ action, index, count, dispatch, errorFor }: CardProps) {
+function ActionCard({ action, index, count, dispatch, errorFor, network, victim }: CardProps) {
   const spec = ACTION_SPECS[action.type];
   const prefix = `actions.${index}`;
   const update = (patch: Partial<Omit<DraftAction, "id" | "type">>) =>
     dispatch({ kind: "update", id: action.id, patch });
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({
+    id: action.id,
+  });
+  const style = { transform: CSS.Translate.toString(transform), transition };
 
   return (
-    <li className="action">
+    <li ref={setNodeRef} style={style} className={isDragging ? "action dragging" : "action"}>
       <header>
-        <strong>
-          {index + 1}. {spec.label}
-        </strong>
+        <div className="action-title">
+          <button
+            type="button"
+            ref={setActivatorNodeRef}
+            className="drag-handle"
+            aria-label={`Drag to reorder ${actionName(action)}`}
+            {...attributes}
+            {...listeners}
+          >
+            ⠿
+          </button>
+          <strong>
+            {index + 1}. {actionName(action)}
+          </strong>
+        </div>
         <div className="action-controls">
           <button type="button" aria-label="Move up" disabled={index === 0} onClick={() => dispatch({ kind: "move", id: action.id, offset: -1 })}>
             ↑
@@ -125,6 +202,9 @@ function ActionCard({ action, index, count, dispatch, errorFor }: CardProps) {
           mono
         />
       ))}
+      {action.type === "ownership" && (
+        <OwnerCheck key={`${network}:${action.contract}`} network={network} victim={victim} contract={action.contract.trim()} />
+      )}
       {action.type === "custom" && <CustomArgs action={action} update={update} error={errorFor(`${prefix}.args`, action.args.join(""))} />}
       <div className="action-row">
         {spec.gas !== "none" && (
@@ -191,4 +271,37 @@ function placeholderFor(type: string): string | undefined {
   if (type.startsWith("bytes")) return "0x…";
   if (/int/.test(type)) return "decimal or 0x";
   return undefined;
+}
+
+type OwnerStatus = { kind: "idle" } | { kind: "checking" } | { kind: "done"; owner: string | null };
+
+function OwnerCheck({ network, victim, contract }: { network: Network; victim: string; contract: string }) {
+  const [status, setStatus] = useState<OwnerStatus>({ kind: "idle" });
+  const ready = !addressProblem(contract) && !addressProblem(victim.trim());
+
+  async function check() {
+    setStatus({ kind: "checking" });
+    try {
+      const { readOwners } = await import("../discovery/onchain");
+      const owners = await readOwners(network, loadUserKey() || BUILT_IN_KEY, [contract]);
+      setStatus({ kind: "done", owner: owners.get(contract.toLowerCase()) ?? null });
+    } catch {
+      setStatus({ kind: "done", owner: null });
+    }
+  }
+
+  return (
+    <div className="owner-check">
+      <button type="button" disabled={!ready || status.kind === "checking"} onClick={check}>
+        {status.kind === "checking" ? "Checking…" : "Check owner on-chain"}
+      </button>
+      {status.kind === "done" && <OwnerResult owner={status.owner} victim={victim} />}
+    </div>
+  );
+}
+
+function OwnerResult({ owner, victim }: { owner: string | null; victim: string }) {
+  if (owner === null) return <p className="field-error">Could not read owner(). The contract may not be Ownable.</p>;
+  if (sameAddress(owner, victim.trim())) return <p className="field-ok">Owned by the compromised wallet.</p>;
+  return <p className="field-error">Owned by {owner}, not the compromised wallet, so this action would fail.</p>;
 }

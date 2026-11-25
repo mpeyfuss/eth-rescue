@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ActionsSection } from "./components/ActionsSection";
+import { DiscoverySection, type Scan } from "./components/DiscoverySection";
 import { InstallSection } from "./components/InstallSection";
 import { ReviewSection } from "./components/ReviewSection";
 import { SetupSection } from "./components/SetupSection";
@@ -30,7 +31,7 @@ function isBlank(draft: Draft): boolean {
   return !draft.victim && !draft.safe && !draft.gas_wallet && draft.actions.length === 0;
 }
 
-export function App() {
+export function App({ scan }: { scan?: Scan } = {}) {
   const [draft, dispatch] = useReducer(draftReducer, undefined, loadStoredDraft);
   const [revealed, setRevealed] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
@@ -102,7 +103,8 @@ export function App() {
       )}
       <InstallSection />
       <SetupSection draft={draft} dispatch={dispatch} errorFor={errorFor} />
-      <ActionsSection actions={draft.actions} dispatch={dispatch} errorFor={errorFor} />
+      <DiscoverySection draft={draft} dispatch={dispatch} scan={scan} />
+      <ActionsSection draft={draft} dispatch={dispatch} errorFor={errorFor} />
       <ReviewSection plan={plan} issues={issues} onReveal={() => setRevealed(true)} />
     </main>
   );

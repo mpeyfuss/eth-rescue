@@ -6,10 +6,19 @@ export type Network = Plan["network"];
 export type PlanAction = Plan["actions"][number];
 export type ActionType = PlanAction["type"];
 
-export const NETWORKS: { value: Network; label: string }[] = [
-  { value: "mainnet", label: "Ethereum mainnet" },
-  { value: "sepolia", label: "Sepolia (testnet)" },
-];
+const TESTNET: { value: Network; label: string } = { value: "sepolia", label: "Sepolia (testnet)" };
+
+// The testnet is for local rehearsals only; it exists in a build only when this flag is set.
+export function networkOptions(testnetEnabled: boolean): { value: Network; label: string }[] {
+  const mainnet = { value: "mainnet" as const, label: "Ethereum mainnet" };
+  return testnetEnabled ? [mainnet, TESTNET] : [mainnet];
+}
+
+export const NETWORKS = networkOptions(import.meta.env.VITE_ENABLE_SEPOLIA === "true");
+
+export function isAvailableNetwork(value: unknown): value is Network {
+  return NETWORKS.some((network) => network.value === value);
+}
 
 type ActionField = "contract" | "amount" | "token_id" | "auction_house" | "target" | "signature";
 
@@ -96,7 +105,7 @@ function integerOrText(text: string): number | string {
   return /^\d+$/.test(text) ? Number(text) : text;
 }
 
-function actionToPlan(action: DraftAction): Record<string, unknown> {
+export function actionToPlan(action: DraftAction): Record<string, unknown> {
   const spec = ACTION_SPECS[action.type];
   const out: Record<string, unknown> = { type: action.type };
   const label = action.label.trim();
@@ -141,7 +150,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function actionFromPlan(value: unknown, index: number): DraftAction {
+export function actionFromPlan(value: unknown, index = 0): DraftAction {
   if (!isRecord(value) || !(ACTION_TYPES as unknown[]).includes(value.type)) {
     throw new PlanImportError(`actions.${index}: unknown action type ${JSON.stringify(isRecord(value) ? value.type : value)}`);
   }
@@ -156,8 +165,11 @@ function actionFromPlan(value: unknown, index: number): DraftAction {
 export function fromPlan(value: unknown): Draft {
   if (!isRecord(value)) throw new PlanImportError("plan must be a JSON object");
   if (value.version !== 1) throw new PlanImportError("only version 1 plans can be imported");
+  if (value.network !== undefined && !isAvailableNetwork(value.network)) {
+    throw new PlanImportError(`network ${JSON.stringify(value.network)} is not supported here`);
+  }
   const draft = emptyDraft();
-  if (NETWORKS.some((network) => network.value === value.network)) draft.network = value.network as Network;
+  if (value.network !== undefined) draft.network = value.network;
   draft.victim = text(value.victim);
   draft.safe = text(value.safe);
   draft.gas_wallet = text(value.gas_wallet);
@@ -170,22 +182,31 @@ export function fromPlan(value: unknown): Draft {
   return draft;
 }
 
+// Identifies the asset an action moves, so discovery does not add it twice.
+export function actionKey(action: Record<string, unknown>): string {
+  const target = String(action.contract ?? action.target ?? "").toLowerCase();
+  return [action.type, target, action.token_id ?? ""].join(":");
+}
+
 export type DraftEvent =
   | { kind: "set"; field: DraftField; value: string | boolean }
   | { kind: "add"; actionType: ActionType }
+  | { kind: "append"; actions: DraftAction[] }
   | { kind: "update"; id: string; patch: Partial<Omit<DraftAction, "id" | "type">> }
   | { kind: "remove"; id: string }
   | { kind: "move"; id: string; offset: -1 | 1 }
+  | { kind: "reorder"; id: string; overId: string }
   | { kind: "replace"; draft: Draft };
 
-function moveAction(actions: DraftAction[], id: string, offset: number): DraftAction[] {
-  const from = actions.findIndex((action) => action.id === id);
-  const to = from + offset;
-  if (from < 0 || to < 0 || to >= actions.length) return actions;
+function moveAction(actions: DraftAction[], from: number, to: number): DraftAction[] {
+  if (from < 0 || to < 0 || to >= actions.length || from === to) return actions;
   const next = [...actions];
-  [next[from], next[to]] = [next[to], next[from]];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
   return next;
 }
+
+const indexOf = (actions: DraftAction[], id: string) => actions.findIndex((action) => action.id === id);
 
 export function draftReducer(draft: Draft, event: DraftEvent): Draft {
   switch (event.kind) {
@@ -193,6 +214,8 @@ export function draftReducer(draft: Draft, event: DraftEvent): Draft {
       return { ...draft, [event.field]: event.value };
     case "add":
       return { ...draft, actions: [...draft.actions, newAction(event.actionType)] };
+    case "append":
+      return { ...draft, actions: [...draft.actions, ...event.actions] };
     case "update":
       return {
         ...draft,
@@ -200,8 +223,15 @@ export function draftReducer(draft: Draft, event: DraftEvent): Draft {
       };
     case "remove":
       return { ...draft, actions: draft.actions.filter((action) => action.id !== event.id) };
-    case "move":
-      return { ...draft, actions: moveAction(draft.actions, event.id, event.offset) };
+    case "move": {
+      const from = indexOf(draft.actions, event.id);
+      return { ...draft, actions: moveAction(draft.actions, from, from < 0 ? -1 : from + event.offset) };
+    }
+    case "reorder":
+      return {
+        ...draft,
+        actions: moveAction(draft.actions, indexOf(draft.actions, event.id), indexOf(draft.actions, event.overId)),
+      };
     case "replace":
       return event.draft;
   }

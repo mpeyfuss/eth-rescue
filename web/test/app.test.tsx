@@ -68,7 +68,7 @@ test("imports a plan file", async () => {
   const { container } = render(<App />);
   const plan = {
     version: 1,
-    network: "sepolia",
+    network: "mainnet",
     victim: VICTIM,
     safe: SAFE,
     actions: [{ type: "ownership", contract: TOKEN, label: "Creator contract" }],
@@ -107,4 +107,15 @@ test("install guide follows the chosen operating system", async () => {
   expect(screen.getByLabelText("Assistant prompt").textContent).toContain("install.ps1");
   await user.click(screen.getByRole("button", { name: "macOS" }));
   expect(screen.getByLabelText("Assistant prompt").textContent).toContain("install.sh");
+});
+
+test("the network picker and testnet plans are absent unless enabled", async () => {
+  const user = userEvent.setup();
+  const { container } = render(<App />);
+  expect(screen.queryByLabelText("Network")).toBeNull();
+  const plan = { version: 1, network: "sepolia", victim: VICTIM, safe: SAFE, actions: [] };
+  const file = new File([JSON.stringify(plan)], "rehearsal.json", { type: "application/json" });
+  await user.upload(container.querySelector('input[type="file"]') as HTMLInputElement, file);
+  expect((await screen.findByRole("alert")).textContent).toContain('network "sepolia" is not supported here');
+  expect(planJson().network).toBe("mainnet");
 });

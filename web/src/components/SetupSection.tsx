@@ -24,16 +24,18 @@ export function SetupSection({ draft, dispatch, errorFor }: Props) {
   return (
     <section className="card">
       <h2>1. Wallets</h2>
-      <div className="field">
-        <label htmlFor="network">Network</label>
-        <select id="network" value={draft.network} onChange={(event) => set("network")(event.target.value as Network)}>
-          {NETWORKS.map((network) => (
-            <option key={network.value} value={network.value}>
-              {network.label}
-            </option>
-          ))}
-        </select>
-      </div>
+      {NETWORKS.length > 1 && (
+        <div className="field">
+          <label htmlFor="network">Network</label>
+          <select id="network" value={draft.network} onChange={(event) => set("network")(event.target.value as Network)}>
+            {NETWORKS.map((network) => (
+              <option key={network.value} value={network.value}>
+                {network.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       {address("victim", "Compromised wallet", "The address whose key leaked.")}
       {address("safe", "Safe wallet", "Receives every rescued asset and leftover ETH. Use a fresh wallet.")}
       {address(

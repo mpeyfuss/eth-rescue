@@ -1,0 +1,30 @@
+{
+ "count": 1,
+ "next": null,
+ "previous": null,
+ "results": [
+  {
+   "id": 7276,
+   "username": "creator",
+   "display_name": "Creator",
+   "pfp": "",
+   "uri": "",
+   "x_username": "",
+   "superrare": "",
+   "first_time_user": false,
+   "curated": false,
+   "creator": true,
+   "joined_at": "2025-03-14T01:32:06.043870Z",
+   "updated_at": "2026-10-28T23:57:29.364858Z",
+   "description": "",
+   "external_url": "",
+   "addresses": [
+    {
+     "raw_address": "0x05658017b00b118d1c06743f5f41b7815f7e9e9b",
+     "chain": "1",
+     "ecosystem": "EVM"
+    }
+   ]
+  }
+ ]
+}

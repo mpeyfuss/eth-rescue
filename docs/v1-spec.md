@@ -157,6 +157,18 @@ Stack: Vite + React + TypeScript, Bun as package manager and test runner (`bun t
 - A "Before you start" card gives per-OS install steps (uv, then `uvx eth-rescue@latest`) and a copyable prompt for an AI assistant that pins the exact commands and forbids asking for keys. Commands use `@latest` so a cached pre-v1 eth-rescue is never reused.
 - Tests run with `bun test`; DOM tests use happy-dom and Testing Library.
 
+### As built (milestone 4)
+
+- "Find assets" scans on demand and shows a checklist; "Add N to the plan" appends actions and skips ones already in the plan. Each source fails on its own and reports its error.
+- **Alchemy:** `alchemy_getTokenBalances` + batched `alchemy_getTokenMetadata`, NFT API v3 `getNFTsForOwner`, all paginated. ERC-20s start unticked (airdrop spam); NFTs start ticked unless Alchemy flags the contract as spam; unsupported NFT standards are skipped. The key is `VITE_ALCHEMY_API_KEY` at build time (so the deployed key must be domain-restricted) or one the user pastes, kept in `localStorage`.
+- **Transient:** `users?address=` → user IDs → `auctions?user_id=&upcoming_or_live=true` and `contracts?user_id=`. `user_id` on auctions matches the token's creator, so only listings whose `seller_address` is the victim are kept; listings with a bid are shown but blocked. Creator contracts are offered only when an on-chain `owner()` (Multicall3) returns the victim.
+- Sepolia exists in the builder only when `VITE_ENABLE_SEPOLIA=true` (e.g. in `web/.env.local`). Otherwise there is no network picker, plans are always mainnet, importing a Sepolia plan is refused, and validation rejects it. With the flag on, Sepolia scans use `api-dev.transient.xyz`.
+- Contract-ownership actions have a "Check owner on-chain" button for manually entered contracts.
+- The RPC client is loaded on first use, so the initial bundle stays ~130 kB gzipped.
+- Fixtures: `web/test/fixtures/transient-*.json` are recorded API responses with profiles scrubbed; `alchemy-*.json` are hand-written in Alchemy's documented shapes.
+- Actions reorder by drag (`@dnd-kit`: pointer, touch and keyboard, with screen-reader announcements) or with the ↑/↓ buttons.
+- Not covered: listings the victim made of other creators' tokens (the auctions API has no seller filter).
+
 ---
 
 ## 4. Repo layout
@@ -179,7 +191,7 @@ Makefile gains `web-dev`, `web-test`, `web-build`, and `schema`.
 1. ✅ **Plan + validate.** `plan.py`, schema export, `validate` and `schema` commands, migrate `examples/`.
 2. ✅ **Dumb CLI.** `bundle.py`/`engine.py` split, reporters, `simulate`/`run`/`gas-wallet new`, delete the wizard, port integration tests.
 3. ✅ **Web builder (manual).** Setup, manual actions, review/export, re-import. Usable end to end with no APIs.
-4. **Discovery.** Alchemy tokens and NFTs, then Transient.
+4. ✅ **Discovery.** Alchemy tokens and NFTs, then Transient.
 5. **Docs + release.** README rewrite, Sepolia rehearsal against the new flow, publish.
 
 ---

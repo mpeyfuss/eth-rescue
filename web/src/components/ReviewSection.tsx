@@ -39,7 +39,7 @@ export function ReviewSection({ plan, issues, onReveal }: Props) {
 
   return (
     <section className="card">
-      <h2>3. Review and export</h2>
+      <h2>4. Review and export</h2>
       {!ready && (
         <div className="issues" role="status">
           <p>

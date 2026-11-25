@@ -95,3 +95,7 @@ test("custom gas is required", () => {
   const value = plan({ actions: [{ type: "custom", target: TOKEN, signature: "f()", args: [] }] });
   expect(paths(value)).toEqual(["actions.0.gas: is required"]);
 });
+
+test("a testnet plan is not supported unless enabled", () => {
+  expect(paths(plan({ network: "sepolia" }))).toEqual(["network: is not supported here"]);
+});

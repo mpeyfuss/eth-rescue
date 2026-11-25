@@ -7,6 +7,7 @@
   --accent: #2456d6;
   --accent-text: #ffffff;
   --danger: #b42318;
+  --ok: #1a7f37;
   --warn-bg: #fff4e5;
   --warn-border: #f0b45b;
   --error-bg: #fdecea;
@@ -26,6 +27,7 @@
     --accent: #6b93ff;
     --accent-text: #0b1020;
     --danger: #ff7b6e;
+    --ok: #4ac26b;
     --warn-bg: #2d2416;
     --warn-border: #8a6326;
     --error-bg: #3a1d1b;
@@ -324,4 +326,123 @@ a {
 .prompt {
   white-space: pre-wrap;
   font-size: 0.82rem;
+}
+
+.field-ok {
+  color: var(--ok);
+  font-size: 0.88rem;
+  margin: 4px 0;
+}
+
+.owner-check {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 8px 0;
+}
+
+.owner-check p {
+  margin: 0;
+}
+
+.scan-results {
+  margin-top: 12px;
+}
+
+.group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 12px 8px;
+  margin: 12px 0;
+}
+
+.candidates {
+  list-style: none;
+  padding: 0;
+  margin: 4px 0 0;
+}
+
+.candidates li {
+  border-top: 1px solid var(--border);
+  padding: 8px 0;
+}
+
+.candidates li:first-child {
+  border-top: none;
+}
+
+.candidates label {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.candidates input {
+  width: auto;
+  margin-top: 4px;
+}
+
+.candidates label > span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.candidates label.blocked {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.candidate-detail {
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.candidate-note {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.sticky-add {
+  position: sticky;
+  bottom: 12px;
+  margin-top: 12px;
+}
+
+.action-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.action-title strong {
+  overflow-wrap: anywhere;
+}
+
+.drag-handle {
+  cursor: grab;
+  touch-action: none;
+  padding: 4px 8px;
+  line-height: 1;
+  font-size: 1.1rem;
+  color: var(--muted);
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.action {
+  background: var(--surface);
+}
+
+.action.dragging {
+  position: relative;
+  z-index: 1;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
 }

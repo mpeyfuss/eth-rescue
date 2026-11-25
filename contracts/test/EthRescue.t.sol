@@ -276,6 +276,20 @@ contract EthRescueTest is Test {
         assertEq(recorder.calls(), 1);
     }
 
+    function testEmitsActionResultPerAction() public {
+        RevertingTarget revertingTarget = new RevertingTarget();
+        CallRecorder recorder = new CallRecorder();
+        EthRescue.Action[] memory actions = new EthRescue.Action[](2);
+        actions[0] = _action(false, address(revertingTarget), 100_000, abi.encodeCall(revertingTarget.fail, ()));
+        actions[1] = _action(false, address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
+
+        vm.expectEmit(true, false, false, true, victim);
+        emit EthRescue.ActionResult(0, false);
+        vm.expectEmit(true, false, false, true, victim);
+        emit EthRescue.ActionResult(1, true);
+        _rescue(actions);
+    }
+
     function testRequiredFailureRevertsActionsAndSweep() public {
         CallRecorder recorder = new CallRecorder();
         RevertingTarget revertingTarget = new RevertingTarget();

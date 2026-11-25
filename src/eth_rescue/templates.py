@@ -1,12 +1,16 @@
 from eth_rescue.types import RescueData
 
-# Fixed gas limits per action type, generously given
-GAS_ERC20 = 75000
-GAS_ERC721 = 150000
-GAS_ERC1155 = 85000
-GAS_OWNERSHIP = 40000
-GAS_TRANSIENT_DELIST = 200000
-GAS_GENERIC = 150000
+# Gas-limit floors per action type, used as-is when a live estimate fails and
+# raised by estimates otherwise. Sized for Amsterdam (EIP-8037), where a transfer
+# to a fresh holder pays ~98k state gas per new storage slot (measured: ERC-20
+# 139.5k, ERC-1155 141k vs ~50k on Osaka). Overestimating only costs funding
+# headroom; unused gas is refunded.
+GAS_ERC20 = 200_000
+GAS_ERC721 = 250_000
+GAS_ERC1155 = 200_000
+GAS_OWNERSHIP = 60_000
+GAS_TRANSIENT_DELIST = 300_000
+GAS_GENERIC = 250_000
 
 
 def erc20_transfer(contract: str, to: str, amount: int) -> RescueData:

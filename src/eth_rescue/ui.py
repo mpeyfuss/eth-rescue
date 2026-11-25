@@ -1,25 +1,17 @@
-from collections.abc import Sequence
-from typing import Any
-
 from rich import box
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
+
+from web3 import Web3
 
 from eth_rescue.types import (
     ActionOutcome,
-    PreparedAction,
+    PreparedBundle,
     RescueData,
     SimulationResult,
 )
 
 console = Console()
-
-
-def title(text: str) -> None:
-    console.print()
-    console.rule(f"[bold cyan]{text}[/bold cyan]", style="cyan")
-    console.print()
 
 
 def section(text: str) -> None:
@@ -40,18 +32,6 @@ def warning(message: str) -> None:
 
 def error(message: str) -> None:
     console.print(f"[red]ERROR[/red] {message}")
-
-
-def callout(title_text: str, lines: Sequence[str], style: str = "cyan") -> None:
-    console.print(
-        Panel(
-            "\n".join(lines),
-            title=title_text,
-            title_align="left",
-            border_style=style,
-            box=box.ASCII,
-        )
-    )
 
 
 def render_rescue_plan(actions: list[RescueData]) -> None:
@@ -75,35 +55,18 @@ def render_rescue_plan(actions: list[RescueData]) -> None:
     console.print()
 
 
-def render_cost_preview(
-    w3: Any, prepared: list[PreparedAction], max_fee_per_gas: int
-) -> None:
-    section("Step 3: Plan & cost preview")
-    console.print(
-        f"Network gas (maxFeePerGas): "
-        f"[bold]{w3.from_wei(max_fee_per_gas, 'gwei')} gwei[/bold]"
-    )
-
-    table = Table(title="Estimated rescue cost", box=box.ASCII)
+def render_bundle(bundle: PreparedBundle) -> None:
+    table = Table(title="Prepared bundle", box=box.ASCII)
     table.add_column("#", justify="right", style="bold")
-    table.add_column("Target", overflow="fold")
-    table.add_column("Gas", justify="right")
-    table.add_column("Estimated ETH", justify="right")
-
-    total = 0
-    for i, action in enumerate(prepared, 1):
-        cost = action["gas"] * max_fee_per_gas
-        total += cost
-        table.add_row(
-            str(i),
-            action["to"],
-            f"{action['gas']:,}",
-            str(w3.from_wei(cost, "ether")),
-        )
-
-    table.add_section()
-    table.add_row("", "Total rescue actions", "", str(w3.from_wei(total, "ether")))
+    table.add_column("Transaction")
+    for i, transaction in enumerate(bundle.transactions, 1):
+        table.add_row(str(i), transaction.role)
     console.print(table)
+    info(
+        f"Target block {bundle.target_block} @ max "
+        f"{Web3.from_wei(bundle.max_fee_per_gas, 'gwei')} gwei; gas wallet needs "
+        f"{Web3.from_wei(bundle.required_funding, 'ether')} ETH"
+    )
 
 
 def render_simulation_result(result: SimulationResult) -> None:
@@ -160,13 +123,3 @@ def render_outcome_report(
             "manually. They are not retried in the legacy fallback."
         )
     console.print()
-
-
-def render_accounts(victim_address: str, gas_address: str) -> None:
-    table = Table(title="Accounts", box=box.ASCII)
-    table.add_column("Role", style="bold")
-    table.add_column("Address", overflow="fold")
-    table.add_row("Victim", victim_address)
-    table.add_row("Gas wallet", gas_address)
-    console.print()
-    console.print(table)

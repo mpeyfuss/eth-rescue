@@ -103,7 +103,9 @@ Argument parsing uses stdlib `argparse`, so no new dependency.
 
 ### Exit codes
 
-`0` included and every checkable action verified · `1` invalid plan, keys, or network mismatch · `2` simulation failed (nothing sent) · `3` gas wallet not funded in time · `4` not included within `max_blocks` · `5` included, but one or more actions failed verification after the fallback.
+`0` included and every checkable action verified · `1` invalid plan, keys, or network mismatch · `2` simulation failed (nothing sent) · `3` gas wallet not funded in time · `4` not included within `max_blocks` · `5` included, but one or more actions failed verification after the fallback. · `6` send declined at the confirmation prompt · `130` interrupted.
+
+The single confirmation covers both phases; the legacy fallback is opted into by `options.legacy_fallback`, so it doesn't prompt again.
 
 ### Code changes
 
@@ -165,8 +167,8 @@ Makefile gains `web-dev`, `web-test`, `web-build`, and `schema`.
 
 ## 5. Milestones
 
-1. **Plan + validate.** `plan.py`, schema export, `validate` and `schema` commands, migrate `examples/`.
-2. **Dumb CLI.** `bundle.py`/`engine.py` split, reporters, `simulate`/`run`/`gas-wallet new`, delete the wizard, port integration tests.
+1. ✅ **Plan + validate.** `plan.py`, schema export, `validate` and `schema` commands, migrate `examples/`.
+2. ✅ **Dumb CLI.** `bundle.py`/`engine.py` split, reporters, `simulate`/`run`/`gas-wallet new`, delete the wizard, port integration tests.
 3. **Web builder (manual).** Setup, manual actions, review/export, re-import. Usable end to end with no APIs.
 4. **Discovery.** Alchemy tokens and NFTs, then Transient.
 5. **Docs + release.** README rewrite, Sepolia rehearsal against the new flow, publish.
@@ -188,3 +190,28 @@ Makefile gains `web-dev`, `web-test`, `web-build`, and `schema`.
 - **Gas budget scales with action count.** `RESCUE_TX_OVERHEAD` is a flat 120k. It doesn't cover per-action calldata and the first call to each target when many actions burn their full gas limit (e.g. old `throw`/`assert` contracts losing a race). If the sweep runs out of gas, the transaction reverts and the bundle is dropped. Fix: a fixed base plus a per-action allowance, and an Anvil test with N gas-burning actions under the real budget.
 - **Nonce race.** If the victim's nonce changes before our transaction in the same block, the 7702 authorization is skipped. The transaction succeeds but rescues nothing. The state checks report "failed", and the fallback or a rerun handles it. Add an integration test for this.
 - **`ActionResult(index, success)` event** in `EthRescue.rescue()`. This makes per-action call results readable from receipt logs, including for `custom` actions. State checks remain the source of truth for typed actions. Requires regenerating the embedded bytecode.
+
+## 8. Gas and fork resilience (EIP-8037 / Amsterdam)
+
+Measured on Anvil (`osaka` vs `amsterdam`):
+
+| Operation | Osaka | Amsterdam |
+| --- | --- | --- |
+| Deploy EthRescue (2,756-byte runtime) | 648k | 4.47M |
+| ETH transfer to a fresh account | 21k | 204.6k |
+| ERC-20 / ERC-1155 transfer to a fresh holder | 50k / 52k | 139.5k / 141k |
+| Set 7702 delegation / clear it | 36.8k / 36.8k | 64k / 28.8k |
+| 7702 rescue overhead per action (calldata included) | ~5.3k | ~5.3k |
+
+Client rules (implemented):
+
+- **Measure, don't hardcode.** Per-action gas limits are live `eth_estimateGas` × 1.5, with template gas as a floor that an estimate can only raise. The sweep's new-account cost comes from a live transfer estimate. The deploy has no fixed fallback.
+- **Size once, before any delegation changes.** Phase-1 estimates also describe the undelegated victim the legacy fallback runs as.
+- **Never exceed 2^24 gas per transaction.** Under EIP-8037, gas above the cap becomes a state-gas reservoir that `GAS`/`gasleft()` can't see and that bypasses call stipends. Staying under the cap keeps the reservoir at zero.
+- **Test every fork.** `make test-integration` runs Osaka and Amsterdam with EIP-7825 enforced. The gas-burner test asserts worst-case overhead uses ≤ 75% of its budget.
+
+Contract rules (for the #2 fix):
+
+- Base gas decisions only on `gasleft()` **before** calls (an aggregate worst-case check). Never infer anything from post-call `gasleft()`: refills from reverting frames and the reservoir make it unreliable (ChainSecurity patterns 1–3).
+- Reserves must cover state gas in the contract's own frame. The sweep's new-account charge is fork- and state-dependent, so the client supplies it rather than a constant.
+- `ActionResult` reports the call's success flag only.

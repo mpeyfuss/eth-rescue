@@ -39,6 +39,7 @@
         },
         "gas": {
           "exclusiveMinimum": 0,
+          "maximum": 8000000,
           "title": "Gas",
           "type": "integer"
         }
@@ -72,6 +73,7 @@
           "anyOf": [
             {
               "exclusiveMinimum": 0,
+              "maximum": 8000000,
               "type": "integer"
             },
             {
@@ -130,6 +132,7 @@
           "anyOf": [
             {
               "exclusiveMinimum": 0,
+              "maximum": 8000000,
               "type": "integer"
             },
             {
@@ -182,6 +185,7 @@
           "anyOf": [
             {
               "exclusiveMinimum": 0,
+              "maximum": 8000000,
               "type": "integer"
             },
             {
@@ -259,6 +263,7 @@
           "anyOf": [
             {
               "exclusiveMinimum": 0,
+              "maximum": 8000000,
               "type": "integer"
             },
             {

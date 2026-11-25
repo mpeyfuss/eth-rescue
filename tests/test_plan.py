@@ -13,7 +13,7 @@ from eth_rescue.plan import (
     parse_plan,
     render_schema,
 )
-from eth_rescue.rescue import NETWORKS
+from eth_rescue.networks import NETWORKS
 
 ROOT = Path(__file__).parents[1]
 EXAMPLES = sorted((ROOT / "examples").glob("*.json"))

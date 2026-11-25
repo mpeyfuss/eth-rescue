@@ -16,6 +16,7 @@ from pydantic import (
 )
 
 from eth_rescue import templates
+from eth_rescue.bundle import MAX_ACTION_GAS
 from eth_rescue.calldata import build_calldata
 from eth_rescue.types import RescueData
 
@@ -49,6 +50,7 @@ Uint256 = Annotated[
     str, Field(pattern=r"^[0-9]{1,78}$"), AfterValidator(_check_uint256)
 ]
 Gwei = Annotated[str, Field(pattern=r"^[0-9]+(\.[0-9]{1,9})?$")]
+Gas = Annotated[int, Field(gt=0, le=MAX_ACTION_GAS)]
 NetworkName = Literal["mainnet", "sepolia"]
 
 
@@ -61,7 +63,7 @@ class _Action(_Model):
 
 
 class _SingleCallAction(_Action):
-    gas: PositiveInt | None = None
+    gas: Gas | None = None
 
 
 class Erc20Action(_SingleCallAction):
@@ -100,7 +102,7 @@ class CustomAction(_Action):
     target: Address
     signature: str = Field(pattern=r"^[A-Za-z_$][A-Za-z0-9_$]*\(.*\)$")
     args: list[JsonValue]
-    gas: PositiveInt
+    gas: Gas
 
 
 Action = Annotated[

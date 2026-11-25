@@ -1,8 +1,19 @@
+from decimal import Decimal
+
 import pytest
 from eth_account import Account
 from web3 import Web3
 
-from eth_rescue import rescue, templates
+from eth_rescue import engine, templates
+from eth_rescue.bundle import (
+    BUNDLE_BLOCK_RANGE,
+    SET_CODE_TX_TYPE,
+    _compute_fees,
+    has_7702_delegation,
+    prepare_actions,
+    prepare_bundle,
+)
+from eth_rescue.engine import ExitCode, Inclusion
 
 pytestmark = pytest.mark.integration
 
@@ -13,28 +24,27 @@ def _send_account_transaction(w3, account, transaction):
     return w3.eth.wait_for_transaction_receipt(tx_hash)
 
 
-def _execute_rescue(w3, victim, gas, safe, rescue_data):
-    prepared = rescue.prepare_actions(rescue_data)
-    preview_bundle = rescue.prepare_bundle(w3, victim, gas, prepared, safe.address, 0.0)
-    simulation = rescue.simulate_prepared_bundle(w3, preview_bundle)
-    assert simulation.ok
-    assert rescue.send_with_retry(w3, victim, gas, prepared, safe.address, 0.0)
+def _execute_rescue(ctx, rescue_data):
+    prepared = engine.sized_actions(ctx, rescue_data)
+    preview_bundle = ctx.prepare(prepare_bundle, prepared)
+    assert engine.simulate_prepared_bundle(ctx, preview_bundle).ok
+    assert isinstance(engine.send_with_retry(ctx, prepared, prepare_bundle), Inclusion)
     return preview_bundle
 
 
 def _delegate_victim(w3: Web3, victim, gas, target: str) -> None:
-    priority_fee, max_fee_per_gas = rescue._compute_fees(w3, 0.0)
+    priority_fee, max_fee_per_gas = _compute_fees(w3, Decimal(0))
     authorization = Account.sign_authorization(
         {"chainId": w3.eth.chain_id, "address": target, "nonce": 0}, victim.key
     )
     signed = gas.sign_transaction(
         {
-            "type": rescue.SET_CODE_TX_TYPE,
+            "type": SET_CODE_TX_TYPE,
             "chainId": w3.eth.chain_id,
             "nonce": w3.eth.get_transaction_count(gas.address),
             "maxPriorityFeePerGas": priority_fee,
             "maxFeePerGas": max_fee_per_gas,
-            "gas": rescue.UNDELEGATE_TX_GAS,
+            "gas": 200_000,  # setting a delegation costs ~64k under EIP-8037
             "to": gas.address,
             "value": 0,
             "data": b"",
@@ -48,7 +58,7 @@ def _delegate_victim(w3: Web3, victim, gas, target: str) -> None:
 
 
 def test_plain_victim_rescues_asset_matrix_and_sweeps_eth(
-    anvil_w3, rescue_accounts, asset_contracts, sequential_relay
+    anvil_w3, rescue_accounts, asset_contracts, sequential_relay, make_ctx
 ):
     victim, gas, safe = rescue_accounts
     erc20 = asset_contracts["erc20"]
@@ -60,10 +70,7 @@ def test_plain_victim_rescues_asset_matrix_and_sweeps_eth(
     gas_balance = anvil_w3.eth.get_balance(gas.address)
 
     bundle = _execute_rescue(
-        anvil_w3,
-        victim,
-        gas,
-        safe,
+        make_ctx(victim, gas, safe),
         [
             templates.erc20_transfer(erc20.address, safe.address, 1_000),
             templates.erc721_transfer(erc721.address, victim.address, safe.address, 1),
@@ -95,7 +102,7 @@ def test_plain_victim_rescues_asset_matrix_and_sweeps_eth(
         < gas_balance - anvil_w3.eth.get_balance(gas.address)
         < bundle.required_funding
     )
-    assert len(sequential_relay.sent) == rescue.BUNDLE_BLOCK_RANGE
+    assert len(sequential_relay.sent) == BUNDLE_BLOCK_RANGE
     assert len(sequential_relay.submitted_receipts[0]) == len(bundle.transactions)
     assert all(
         receipt["status"] == 1 for receipt in sequential_relay.submitted_receipts[0]
@@ -103,19 +110,16 @@ def test_plain_victim_rescues_asset_matrix_and_sweeps_eth(
 
 
 def test_delegated_victim_is_undelegated_before_rescue(
-    anvil_w3, rescue_accounts, asset_contracts, sequential_relay
+    anvil_w3, rescue_accounts, asset_contracts, sequential_relay, make_ctx
 ):
     victim, gas, safe = rescue_accounts
     erc20 = asset_contracts["erc20"]
     _delegate_victim(anvil_w3, victim, gas, asset_contracts["delegate"].address)
-    assert rescue._has_7702_delegation(anvil_w3, victim.address)
+    assert has_7702_delegation(anvil_w3, victim.address)
     starting_nonce = anvil_w3.eth.get_transaction_count(victim.address)
 
     bundle = _execute_rescue(
-        anvil_w3,
-        victim,
-        gas,
-        safe,
+        make_ctx(victim, gas, safe),
         [templates.erc20_transfer(erc20.address, safe.address, 1_000)],
     )
 
@@ -128,11 +132,11 @@ def test_delegated_victim_is_undelegated_before_rescue(
     assert anvil_w3.eth.get_code(victim.address) == b""
     assert erc20.functions.balanceOf(safe.address).call() == 1_000
     assert anvil_w3.eth.get_transaction_count(victim.address) == starting_nonce + 3
-    assert len(sequential_relay.sent) == rescue.BUNDLE_BLOCK_RANGE
+    assert len(sequential_relay.sent) == BUNDLE_BLOCK_RANGE
 
 
 def test_delist_then_transfer_rescues_escrowed_erc721(
-    anvil_w3, rescue_accounts, asset_contracts, sequential_relay
+    anvil_w3, rescue_accounts, asset_contracts, sequential_relay, make_ctx
 ):
     victim, gas, safe = rescue_accounts
     erc721 = asset_contracts["erc721"]
@@ -154,10 +158,7 @@ def test_delist_then_transfer_rescues_escrowed_erc721(
     assert erc721.functions.ownerOf(1).call() == auction.address
 
     bundle = _execute_rescue(
-        anvil_w3,
-        victim,
-        gas,
-        safe,
+        make_ctx(victim, gas, safe),
         templates.transient_auction_house_erc721_rescue(
             auction.address, erc721.address, victim.address, safe.address, 1
         ),
@@ -173,18 +174,19 @@ def test_delist_then_transfer_rescues_escrowed_erc721(
         == "0x0000000000000000000000000000000000000000"
     )
     assert erc721.functions.ownerOf(1).call() == safe.address
-    assert len(sequential_relay.sent) == rescue.BUNDLE_BLOCK_RANGE
+    assert len(sequential_relay.sent) == BUNDLE_BLOCK_RANGE
 
 
 def test_reverting_action_rolls_back_simulation_and_blocks_submission(
-    anvil_w3, rescue_accounts, asset_contracts, sequential_relay
+    anvil_w3, rescue_accounts, asset_contracts, sequential_relay, make_ctx
 ):
     victim, gas, safe = rescue_accounts
     erc20 = asset_contracts["erc20"]
-    prepared = rescue.prepare_actions(
+    ctx = make_ctx(victim, gas, safe)
+    prepared = prepare_actions(
         [templates.erc20_transfer(erc20.address, safe.address, 1_001)]
     )
-    bundle = rescue.prepare_bundle(anvil_w3, victim, gas, prepared, safe.address, 0.0)
+    bundle = ctx.prepare(prepare_bundle, prepared)
     before = {
         "victim_balance": anvil_w3.eth.get_balance(victim.address),
         "gas_balance": anvil_w3.eth.get_balance(gas.address),
@@ -194,7 +196,7 @@ def test_reverting_action_rolls_back_simulation_and_blocks_submission(
         "code": anvil_w3.eth.get_code(victim.address),
     }
 
-    outcome = rescue.simulate_prepared_bundle(anvil_w3, bundle)
+    outcome = engine.simulate_prepared_bundle(ctx, bundle)
 
     assert not outcome.ok
     failure = outcome.failures[0]
@@ -208,7 +210,8 @@ def test_reverting_action_rolls_back_simulation_and_blocks_submission(
         "token_balance": erc20.functions.balanceOf(victim.address).call(),
         "code": anvil_w3.eth.get_code(victim.address),
     }
-    assert not rescue.send_with_retry(
-        anvil_w3, victim, gas, prepared, safe.address, 0.0
+    assert (
+        engine.send_with_retry(ctx, prepared, prepare_bundle)
+        == ExitCode.SIMULATION_FAILED
     )
     assert sequential_relay.sent == []

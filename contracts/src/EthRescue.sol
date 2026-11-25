@@ -31,6 +31,13 @@ contract EthRescue is IERC165, IERC721Receiver, IERC1155Receiver {
     address public immutable SAFE;
 
     /////////////////////////////////////////////////////////////////////
+    // EVENTS
+    /////////////////////////////////////////////////////////////////////
+
+    /// @dev Reports EVM call success only; a non-reverting call may still have failed at the protocol level.
+    event ActionResult(uint256 indexed index, bool success);
+
+    /////////////////////////////////////////////////////////////////////
     // ERRORS
     /////////////////////////////////////////////////////////////////////
 
@@ -92,6 +99,7 @@ contract EthRescue is IERC165, IERC721Receiver, IERC1155Receiver {
 
             (bool success,,) = LibCall.tryCall(action.target, 0, action.gasStipend, 0, action.data);
             if (!success && action.required) revert RequiredActionFailed(i);
+            emit ActionResult(i, success);
         }
 
         _sweepEth();

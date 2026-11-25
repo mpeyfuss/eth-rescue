@@ -15,6 +15,7 @@ from eth_account.signers.local import LocalAccount
 from web3 import HTTPProvider, Web3
 from web3.types import TxReceipt
 
+from eth_rescue.engine import RescueContext
 from eth_rescue.types import BundleEntry, SimulationResult
 
 ANVIL_HARDFORK = os.environ.get("ANVIL_HARDFORK", "osaka")
@@ -47,6 +48,7 @@ def anvil_w3() -> Iterator[Web3]:
             str(port),
             "--chain-id",
             "31337",
+            "--enable-tx-gas-limit",
             "--quiet",
         ],
         stdout=subprocess.PIPE,
@@ -248,3 +250,28 @@ def asset_contracts(anvil_w3: Web3, rescue_accounts):
         )
         assert receipt["status"] == 1
     return contracts
+
+
+@pytest.fixture
+def make_ctx(anvil_w3: Web3, reporter):
+    """Build a RescueContext that never sleeps; extra fields override defaults."""
+
+    def make(victim, gas, safe, **overrides) -> RescueContext:
+        fields = {
+            "w3": anvil_w3,
+            "victim": victim,
+            "gas": gas,
+            "safe": safe.address,
+            "reporter": reporter,
+            "poll_interval": 0,
+            "funding_timeout": 0,
+            "sleep": lambda seconds: None,
+        }
+        return RescueContext(**(fields | overrides))
+
+    return make
+
+
+@pytest.fixture
+def gas_burner(anvil_w3: Web3):
+    return _deploy(anvil_w3, "FixtureGasBurner")

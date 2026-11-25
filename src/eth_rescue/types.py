@@ -66,6 +66,8 @@ class BundleTransaction:
     role: TransactionRole
     signed_transaction: HexBytes
     action_index: int | None = None
+    # first plan action index covered by a rescue-7702 call
+    batch_start: int | None = None
 
 
 @dataclass(frozen=True)

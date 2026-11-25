@@ -113,12 +113,19 @@ def evaluate_checks(
     checks: dict[int, Check],
     snapshot: dict[int, int],
     action_count: int,
+    call_results: dict[int, bool] | None = None,
 ) -> list[ActionOutcome]:
+    """State checks decide typed actions. Without one, a reverted call (from the
+    ActionResult log) is a definite failure; a successful call stays unverified."""
+    call_results = call_results or {}
     outcomes: list[ActionOutcome] = []
     for index in range(action_count):
         check = checks.get(index)
         if check is None:
-            outcomes.append(ActionOutcome(index, "unverified"))
+            reverted = call_results.get(index) is False
+            outcomes.append(
+                ActionOutcome(index, "failed" if reverted else "unverified")
+            )
         elif _check_passed(w3, check, snapshot.get(index)):
             outcomes.append(ActionOutcome(index, "rescued"))
         else:

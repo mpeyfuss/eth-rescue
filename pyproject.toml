@@ -8,7 +8,6 @@ dependencies = [
     "eth-abi>=5.2.0",
     "eth-utils>=4.1.1",
     "pydantic>=2.13.4",
-    "questionary>=2.1.0",
     "requests>=2.32",
     "rich>=14.0.0",
     "web3>=7.16,<8",

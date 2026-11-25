@@ -124,3 +124,12 @@ contract FixtureAuctionHouse {
 }
 
 contract FixtureDelegateTarget {}
+
+// Consumes every unit of forwarded gas, like a pre-0.8 `throw`/`assert` failure.
+contract FixtureGasBurner {
+    fallback() external {
+        assembly {
+            invalid()
+        }
+    }
+}

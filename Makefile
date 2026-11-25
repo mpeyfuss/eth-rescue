@@ -14,10 +14,12 @@ test: test-unit
 test-unit:
 	uv run pytest -m "not integration"
 
+# Every integration run covers the live fork and the next one (Amsterdam /
+# Glamsterdam, with EIP-8037 state gas) so gas-schedule breakage shows up early.
 test-integration:
 	forge build --root contracts
 	forge build --root tests/integration/contracts
-	RUN_ANVIL_INTEGRATION=1 uv run pytest -m integration
+	RUN_ANVIL_INTEGRATION=1 ANVIL_HARDFORK=osaka uv run pytest -m integration
+	RUN_ANVIL_INTEGRATION=1 ANVIL_HARDFORK=amsterdam uv run pytest -m integration
 
-test-all:
-	RUN_ANVIL_INTEGRATION=1 uv run pytest
+test-all: test-unit test-integration

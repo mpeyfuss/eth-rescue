@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "network": "mainnet",
+  "victim": "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61",
+  "safe": "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1",
+  "gas_wallet": "0x2546BcD3c84621e976D8185a91A922aE77ECEc30",
+  "options": {
+    "priority_fee_gwei": "2.5",
+    "max_blocks": 50,
+    "legacy_fallback": true
+  },
+  "actions": [
+    { "type": "erc20", "contract": "0x41A322b28D0fF354040e2CbC676F0320d8c8850d", "amount": "1000000000000000000" },
+    { "type": "erc721", "contract": "0x5509102d66eEC09A994f978c80535572890f1Fef", "token_id": "78", "gas": 140000 },
+    { "type": "erc1155", "contract": "0xF1AB05dC0829903c65690dc8e936B02888e7E52E", "token_id": "0", "amount": "1" },
+    { "type": "ownership", "contract": "0xEF561A49Cc31938661D02b5357088c2b153E486e", "label": "Creator contract" },
+    {
+      "type": "transient_delist_erc721",
+      "auction_house": "0x6f66b95a0C512f3497FB46660E0BC3B94B989F8d",
+      "contract": "0x5509102d66eEC09A994f978c80535572890f1Fef",
+      "token_id": "79"
+    },
+    {
+      "type": "custom",
+      "label": "CryptoPunk #78",
+      "target": "0xb47e3cd837dDF8e4c57F05d70Ab865de6e193BBB",
+      "signature": "transferPunk(address,uint256)",
+      "args": ["0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1", "78"],
+      "gas": 75000
+    }
+  ]
+}

@@ -54,3 +54,33 @@ def test_parse_types_keeps_nested_tuples_intact():
 
 def test_parse_types_empty_signature_returns_no_types():
     assert calldata._parse_types("pause()") == []
+
+
+def test_build_calldata_coerces_json_friendly_values():
+    native = build_calldata(
+        "f(uint256,int8,bytes,bytes4)", [2**255, -1, b"\x01\x02", b"\xde\xad\xbe\xef"]
+    )
+    json_friendly = build_calldata(
+        "f(uint256,int8,bytes,bytes4)", [str(2**255), "-1", "0x0102", "0xdeadbeef"]
+    )
+
+    assert json_friendly == native
+
+
+def test_build_calldata_coerces_hex_integers():
+    assert build_calldata("f(uint256)", ["0xff"]) == build_calldata("f(uint256)", [255])
+
+
+def test_build_calldata_coerces_nested_arrays_and_tuples():
+    signature = "f((address,uint256)[],uint256[2])"
+    native = build_calldata(signature, [[(SAFE, 1), (VICTIM, 2)], [3, 4]])
+    json_friendly = build_calldata(
+        signature, [[[SAFE, "1"], [VICTIM, "2"]], ["3", "4"]]
+    )
+
+    assert json_friendly == native
+
+
+def test_build_calldata_rejects_wrong_tuple_shape():
+    with pytest.raises(ValueError, match="expected 2 values"):
+        build_calldata("f((address,uint256))", [[SAFE]])

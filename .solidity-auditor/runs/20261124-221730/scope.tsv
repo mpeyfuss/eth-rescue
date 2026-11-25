@@ -1,0 +1,4 @@
+name	eth-rescue
+mode	filename
+files	contracts/src/EthRescue.sol
+passes_planned	1

@@ -1,10 +1,13 @@
-.PHONY: test test-unit test-integration test-all
+.PHONY: fmt lint schema test test-unit test-integration test-all
 
 fmt:
 	uv run ruff format .
 
 lint:
 	uv run ruff check . --fix
+
+schema:
+	uv run eth-rescue schema > schema/plan.v1.schema.json
 
 test: test-unit
 

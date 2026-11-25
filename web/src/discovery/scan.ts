@@ -15,13 +15,13 @@ import {
   listingCandidates,
   transientApi,
 } from "./transient";
-import type { Candidate, ScanRequest, ScanResult, SourceError } from "./types";
+import type { Candidate, ScanRequest, ScanResult, SourceError, Warn } from "./types";
 
-type Source = { name: string; run: () => Promise<Candidate[]> };
+type Source = { name: string; run: (warn: Warn) => Promise<Candidate[]> };
 
-async function scanTokens({ network, victim, alchemyKey }: ScanRequest): Promise<Candidate[]> {
+async function scanTokens({ network, victim, alchemyKey }: ScanRequest, warn: Warn): Promise<Candidate[]> {
   if (!alchemyKey) return [];
-  const balances = await fetchTokenBalances(network, alchemyKey, victim);
+  const balances = await fetchTokenBalances(network, alchemyKey, victim, warn);
   const held = heldBalances(balances);
   const metadata = await fetchTokenMetadata(
     network,
@@ -31,9 +31,9 @@ async function scanTokens({ network, victim, alchemyKey }: ScanRequest): Promise
   return tokenCandidates(held, metadata);
 }
 
-async function scanNfts({ network, victim, alchemyKey }: ScanRequest): Promise<Candidate[]> {
+async function scanNfts({ network, victim, alchemyKey }: ScanRequest, warn: Warn): Promise<Candidate[]> {
   if (!alchemyKey) return [];
-  return nftCandidates(await fetchNfts(network, alchemyKey, victim));
+  return nftCandidates(await fetchNfts(network, alchemyKey, victim, warn));
 }
 
 type ReadOwners = typeof readOwners;
@@ -41,16 +41,23 @@ type ReadOwners = typeof readOwners;
 async function scanTransient(
   { network, victim, alchemyKey }: ScanRequest,
   ownersOf: ReadOwners,
+  warn: Warn,
 ): Promise<Candidate[]> {
   const api = transientApi(network);
-  const userIds = await findUserIds(api, victim);
+  const userIds = await findUserIds(api, victim, warn);
   if (userIds.length === 0) return [];
   const [listings, contracts] = await Promise.all([
-    fetchCreatorListings(api, network, userIds),
-    fetchCreatorContracts(api, network, userIds),
+    fetchCreatorListings(api, network, userIds, warn),
+    fetchCreatorContracts(api, network, userIds, warn),
   ]);
   const addresses = contracts.map((contract) => contract.address.raw_address);
-  const owners = await ownersOf(network, alchemyKey, addresses);
+  let owners = new Map<string, string | null>();
+  try {
+    owners = await ownersOf(network, alchemyKey, addresses);
+  } catch (error) {
+    // Listings need no RPC; keep them, and mark the contracts unreadable.
+    if (addresses.length > 0) warn(`could not read contract owners: ${message(error)}`);
+  }
   return [...listingCandidates(listings, victim), ...contractCandidates(contracts, owners, victim)];
 }
 
@@ -61,11 +68,14 @@ function message(error: unknown): string {
 // Each source fails on its own so one outage never hides the others' results.
 export async function scanWallet(request: ScanRequest, ownersOf: ReadOwners = readOwners): Promise<ScanResult> {
   const sources: Source[] = [
-    { name: "Tokens (Alchemy)", run: () => scanTokens(request) },
-    { name: "NFTs (Alchemy)", run: () => scanNfts(request) },
-    { name: "Transient", run: () => scanTransient(request, ownersOf) },
+    { name: "Tokens (Alchemy)", run: (warn) => scanTokens(request, warn) },
+    { name: "NFTs (Alchemy)", run: (warn) => scanNfts(request, warn) },
+    { name: "Transient", run: (warn) => scanTransient(request, ownersOf, warn) },
   ];
-  const settled = await Promise.allSettled(sources.map((source) => source.run()));
+  const warnings: SourceError[] = [];
+  const settled = await Promise.allSettled(
+    sources.map((source) => source.run((text) => warnings.push({ source: source.name, message: text }))),
+  );
   const candidates: Candidate[] = [];
   const errors: SourceError[] = [];
   settled.forEach((result, index) => {
@@ -73,5 +83,5 @@ export async function scanWallet(request: ScanRequest, ownersOf: ReadOwners = re
     else errors.push({ source: sources[index].name, message: message(result.reason) });
   });
   const seen = new Set<string>();
-  return { candidates: candidates.filter((c) => !seen.has(c.key) && seen.add(c.key)), errors };
+  return { candidates: candidates.filter((c) => !seen.has(c.key) && seen.add(c.key)), errors, warnings };
 }

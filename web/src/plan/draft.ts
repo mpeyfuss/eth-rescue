@@ -36,7 +36,7 @@ export const ACTION_SPECS: Record<ActionType, ActionSpec> = {
   transient_delist_erc721: {
     label: "Transient: delist ERC-721",
     fields: ["auction_house", "contract", "token_id"],
-    gas: "none",
+    gas: "optional",
   },
   custom: { label: "Custom call", fields: ["target", "signature"], gas: "required" },
 };
@@ -51,6 +51,22 @@ export interface DraftAction extends Record<ActionField, string> {
   label: string;
   gas: string;
   args: string[];
+  // `network:victim` the asset was discovered for; empty when added by hand.
+  discoveredFor: string;
+}
+
+export function discoveryScope(network: Network, victim: string): string {
+  return `${network}:${victim.trim().toLowerCase()}`;
+}
+
+// Discovered actions that no longer match the plan's wallet or network.
+export function staleDiscoveries(draft: Draft): { path: string; message: string }[] {
+  const scope = discoveryScope(draft.network, draft.victim);
+  return draft.actions.flatMap((action, index) =>
+    action.discoveredFor && action.discoveredFor !== scope
+      ? [{ path: `actions.${index}`, message: "was found for a different wallet or network; remove it" }]
+      : [],
+  );
 }
 
 export interface Draft {
@@ -97,6 +113,7 @@ export function newAction(type: ActionType): DraftAction {
     target: "",
     signature: "",
     args: [],
+    discoveredFor: "",
   };
 }
 
@@ -165,11 +182,12 @@ export function actionFromPlan(value: unknown, index = 0): DraftAction {
 export function fromPlan(value: unknown): Draft {
   if (!isRecord(value)) throw new PlanImportError("plan must be a JSON object");
   if (value.version !== 1) throw new PlanImportError("only version 1 plans can be imported");
-  if (value.network !== undefined && !isAvailableNetwork(value.network)) {
+  if (value.network === undefined) throw new PlanImportError("network is required");
+  if (!isAvailableNetwork(value.network)) {
     throw new PlanImportError(`network ${JSON.stringify(value.network)} is not supported here`);
   }
   const draft = emptyDraft();
-  if (value.network !== undefined) draft.network = value.network;
+  draft.network = value.network;
   draft.victim = text(value.victim);
   draft.safe = text(value.safe);
   draft.gas_wallet = text(value.gas_wallet);

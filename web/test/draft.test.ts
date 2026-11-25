@@ -59,7 +59,8 @@ test("non-integer numbers stay text so validation reports them", () => {
 test("fromPlan rejects non-plans", () => {
   expect(() => fromPlan([])).toThrow(PlanImportError);
   expect(() => fromPlan({ version: 2 })).toThrow("only version 1");
-  expect(() => fromPlan({ version: 1, actions: [{ type: "nope" }] })).toThrow("actions.0");
+  expect(() => fromPlan({ version: 1, actions: [] })).toThrow("network is required");
+  expect(() => fromPlan({ version: 1, network: "mainnet", actions: [{ type: "nope" }] })).toThrow("actions.0");
 });
 
 test("secrets are recognised", () => {
@@ -72,4 +73,13 @@ test("secrets are recognised", () => {
 test("the testnet is offered only when enabled", () => {
   expect(networkOptions(false).map((network) => network.value)).toEqual(["mainnet"]);
   expect(networkOptions(true).map((network) => network.value)).toEqual(["mainnet", "sepolia"]);
+});
+
+test("looksLikeSecret finds keys and seed phrases inside other text", () => {
+  const key = `0x${"ab".repeat(32)}`;
+  expect(looksLikeSecret(`Private key: ${key}`)).toBe(true);
+  expect(looksLikeSecret(`Address: 0x${"12".repeat(20)}\nPrivate key: ${key}`)).toBe(true);
+  expect(looksLikeSecret("my words: abandon ability able about above absent absorb abstract absurd abuse access accident")).toBe(true);
+  expect(looksLikeSecret(`0x${"12".repeat(20)}`)).toBe(false);
+  expect(looksLikeSecret("My favourite art drop from the summer")).toBe(false);
 });

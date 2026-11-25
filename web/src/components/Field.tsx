@@ -1,6 +1,8 @@
 import { type ReactNode, useId, useState } from "react";
 import { looksLikeSecret } from "../plan/address";
 
+export type SecretCheck = (value: string) => boolean;
+
 interface TextFieldProps {
   label: string;
   value: string;
@@ -9,16 +11,25 @@ interface TextFieldProps {
   hint?: ReactNode;
   placeholder?: string;
   mono?: boolean;
-  // Off only where 32-byte hex is legitimate input (custom call args).
-  blockSecrets?: boolean;
+  // Where 32-byte hex is legitimate input (bytes args), pass a narrower check.
+  isSecret?: SecretCheck;
 }
 
-export function TextField({ label, value, onChange, error, hint, placeholder, mono, blockSecrets = true }: TextFieldProps) {
+export function TextField({
+  label,
+  value,
+  onChange,
+  error,
+  hint,
+  placeholder,
+  mono,
+  isSecret = looksLikeSecret,
+}: TextFieldProps) {
   const id = useId();
   const [blocked, setBlocked] = useState(false);
 
   function handleChange(next: string) {
-    if (blockSecrets && looksLikeSecret(next)) {
+    if (isSecret(next)) {
       setBlocked(true);
       return;
     }

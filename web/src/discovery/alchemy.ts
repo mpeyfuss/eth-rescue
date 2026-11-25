@@ -1,6 +1,6 @@
 import { formatUnits, getAddress } from "viem";
 import { actionKey, type Network } from "../plan/draft";
-import { type Candidate, fetchJson } from "./types";
+import { type Candidate, fetchJson, requireArray, type Warn } from "./types";
 
 const HOSTS: Record<Network, string> = {
   mainnet: "eth-mainnet.g.alchemy.com",
@@ -48,7 +48,12 @@ async function rpc<T>(url: string, method: string, params: unknown[]): Promise<T
   return response.result;
 }
 
-export async function fetchTokenBalances(network: Network, key: string, owner: string): Promise<TokenBalance[]> {
+export async function fetchTokenBalances(
+  network: Network,
+  key: string,
+  owner: string,
+  warn?: Warn,
+): Promise<TokenBalance[]> {
   const balances: TokenBalance[] = [];
   let pageKey: string | undefined;
   for (let page = 0; page < MAX_PAGES; page++) {
@@ -58,10 +63,11 @@ export async function fetchTokenBalances(network: Network, key: string, owner: s
       "alchemy_getTokenBalances",
       [owner, "erc20", options],
     );
-    balances.push(...result.tokenBalances);
+    balances.push(...requireArray<TokenBalance>(result?.tokenBalances, "Alchemy token balance"));
     pageKey = result.pageKey;
-    if (!pageKey) break;
+    if (!pageKey) return balances;
   }
+  warn?.(`only the first ${balances.length} token balances were read; there are more`);
   return balances;
 }
 
@@ -74,19 +80,20 @@ export async function fetchTokenMetadata(
   for (let start = 0; start < contracts.length; start += METADATA_BATCH) {
     const chunk = contracts.slice(start, start + METADATA_BATCH);
     const batch = chunk.map((contract, id) => ({ jsonrpc: "2.0", id, method: "alchemy_getTokenMetadata", params: [contract] }));
-    const responses = await fetchJson<RpcResponse<TokenMetadata>[]>(rpcUrl(network, key), {
+    const responses = await fetchJson<unknown>(rpcUrl(network, key), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(batch),
     });
-    for (const response of responses) {
-      if (response.result) metadata.set(chunk[response.id].toLowerCase(), response.result);
+    for (const response of requireArray<RpcResponse<TokenMetadata>>(responses, "Alchemy token metadata")) {
+      const contract = chunk[response?.id];
+      if (contract && response.result) metadata.set(contract.toLowerCase(), response.result);
     }
   }
   return metadata;
 }
 
-export async function fetchNfts(network: Network, key: string, owner: string): Promise<AlchemyNft[]> {
+export async function fetchNfts(network: Network, key: string, owner: string, warn?: Warn): Promise<AlchemyNft[]> {
   const nfts: AlchemyNft[] = [];
   let pageKey: string | undefined;
   for (let page = 0; page < MAX_PAGES; page++) {
@@ -95,10 +102,11 @@ export async function fetchNfts(network: Network, key: string, owner: string): P
     const result = await fetchJson<{ ownedNfts: AlchemyNft[]; pageKey?: string | null }>(
       `${nftUrl(network, key)}/getNFTsForOwner?${query}`,
     );
-    nfts.push(...result.ownedNfts);
+    nfts.push(...requireArray<AlchemyNft>(result?.ownedNfts, "Alchemy NFT"));
     pageKey = result.pageKey ?? undefined;
-    if (!pageKey) break;
+    if (!pageKey) return nfts;
   }
+  warn?.(`only the first ${nfts.length} NFTs were read; there are more`);
   return nfts;
 }
 
@@ -129,6 +137,7 @@ export function tokenCandidates(balances: TokenBalance[], metadata: Map<string, 
         group: "tokens" as const,
         title: meta?.name ? `${meta.name} (${symbol})` : symbol,
         detail: `${shown} · ${contract}`,
+        source: "Alchemy",
         action,
         // Token lists are full of airdropped spam, so the user opts in to each one.
         preselect: false,
@@ -143,16 +152,20 @@ export function nftCandidates(nfts: AlchemyNft[]): Candidate[] {
     const collection = nft.contract.name || nft.contract.symbol || contract;
     const name = nft.name || `${collection} #${nft.tokenId}`;
     const spam = Boolean(nft.contract.isSpam);
-    const common = { group: "nfts" as const, title: name, preselect: !spam };
+    const common = { group: "nfts" as const, title: name, preselect: !spam, source: "Alchemy" };
     const spamNote = spam ? " · flagged as spam" : "";
     if (nft.tokenType === "ERC721") {
       const action = { type: "erc721" as const, contract, token_id: nft.tokenId, label: name };
-      return [{ ...common, key: actionKey(action), detail: `${collection} · ERC-721${spamNote}`, action }];
+      const detail = `${collection} · ERC-721 · ${contract} #${nft.tokenId}${spamNote}`;
+      return [{ ...common, key: actionKey(action), detail, action }];
     }
     if (nft.tokenType === "ERC1155") {
-      const amount = nft.balance ?? "1";
+      const known = /^[1-9]\d*$/.test(nft.balance ?? "");
+      const amount = known ? (nft.balance as string) : "1";
       const action = { type: "erc1155" as const, contract, token_id: nft.tokenId, amount, label: name };
-      return [{ ...common, key: actionKey(action), detail: `${collection} · ERC-1155 × ${amount}${spamNote}`, action }];
+      const shown = known ? `× ${amount}` : "× 1 (balance not reported; check it)";
+      const detail = `${collection} · ERC-1155 · ${contract} #${nft.tokenId} ${shown}${spamNote}`;
+      return [{ ...common, key: actionKey(action), detail, action }];
     }
     return [];
   });

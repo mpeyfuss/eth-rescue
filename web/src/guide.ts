@@ -1,13 +1,18 @@
 export type Os = "macos" | "linux" | "windows";
 
-// @latest so a cached older eth-rescue (with a different plan format) is never reused.
-export const CLI = "uvx eth-rescue@latest";
+// Pinned to the release that reads these plans, so neither a cached older
+// eth-rescue nor a future incompatible one is used.
+export const CLI_VERSION = "1.0.0";
+export const CLI = `uvx eth-rescue@${CLI_VERSION}`;
+export const RUN_STEPS =
+  "asks for the private keys in a hidden prompt, shows what the plan will do, waits until the gas wallet holds enough ETH (it tells you how much), simulates the rescue, and asks once before sending. If anything has no effect, it retries those actions with a direct fallback without asking again.";
 export const PLAN_FILE = "plan.json";
 
 export const COMMANDS = {
   check: `${CLI} --help`,
   gasWallet: `${CLI} gas-wallet new`,
   validate: `${CLI} validate ${PLAN_FILE}`,
+  simulate: `${CLI} simulate ${PLAN_FILE}`,
   run: `${CLI} run ${PLAN_FILE}`,
 };
 
@@ -58,8 +63,12 @@ Use only these steps and commands:
    ${COMMANDS.gasWallet}
 5. Go to the folder that contains ${PLAN_FILE}, then run:
    ${COMMANDS.validate}
+   Optionally rehearse without sending anything (it asks for the keys too):
+   ${COMMANDS.simulate}
+   Then run the rescue:
    ${COMMANDS.run}
-   The run command asks for private keys in a hidden prompt, simulates the rescue, tells me how much ETH the gas wallet needs, and asks once before sending.
+   The run command ${RUN_STEPS}
+6. When it finishes, read the outcome table. Exit code 0 means everything was verified. If it says it cannot tell whether the rescue landed, do not run it again until we have checked the gas wallet's latest transactions on a block explorer.
 
 Safety rules you must follow:
 - Never ask me for a private key or seed phrase, and never tell me to put one in this chat, in a command, or in a file. eth-rescue asks for keys itself in a hidden prompt, and I will only type them there.

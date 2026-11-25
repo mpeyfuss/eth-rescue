@@ -88,7 +88,7 @@ test("custom arg count must match the signature", () => {
 test("custom args that do not encode are rejected", () => {
   const [issue] = validatePlan(custom("transferPunk(address,uint256)", [SAFE, "abc"]));
   expect(issue.path).toBe("actions.0.args");
-  expect(issue.message).toStartWith("args do not encode");
+  expect(issue.message).toBe("args[1]: expected an integer or a decimal/0x string");
 });
 
 test("custom gas is required", () => {
@@ -98,4 +98,20 @@ test("custom gas is required", () => {
 
 test("a testnet plan is not supported unless enabled", () => {
   expect(paths(plan({ network: "sepolia" }))).toEqual(["network: is not supported here"]);
+});
+
+test("an inherited object key is not an action type", () => {
+  expect(paths(plan({}, { type: "toString" }))).toEqual(["actions.0.type: is not a known action type"]);
+});
+
+test("field checks still run when the schema rejects something else", () => {
+  const issues = paths(plan({}, { contract: TOKEN.toLowerCase().replace("41a3", "41A3"), extra: 1 }));
+  expect(issues).toContain("actions.0.contract: has an invalid checksum");
+  expect(issues).toContain("actions.0.extra: is not a known field");
+});
+
+test("the zero address and the compromised wallet are refused where EthRescue refuses them", () => {
+  const zero = "0x0000000000000000000000000000000000000000";
+  expect(paths(plan({ safe: zero }))).toEqual(["safe: must not be the zero address"]);
+  expect(paths(plan({}, { contract: VICTIM }))).toEqual(["actions.0.contract: must not be the compromised wallet"]);
 });

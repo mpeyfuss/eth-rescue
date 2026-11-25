@@ -93,11 +93,32 @@ test("custom actions get one input per parameter", async () => {
   render(<App />);
   await user.selectOptions(screen.getByLabelText("Action type"), "custom");
   await user.click(screen.getByRole("button", { name: "Add action" }));
-  await paste(user, "Function signature", "transferPunk(address to, uint256 punkIndex)");
-  await paste(user, "punkIndex (uint256)", "78");
+  await paste(user, "Function signature", "transferPunk(address,uint256)");
+  await paste(user, "arg 2 (uint256)", "78");
   const [action] = planJson().actions as Record<string, unknown>[];
   expect(action.args).toEqual(["", "78"]);
-  expect(screen.getByLabelText("to (address)")).toBeDefined();
+  expect(screen.getByLabelText("arg 1 (address)")).toBeDefined();
+});
+
+test("a non-canonical signature names the canonical form", async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  await user.selectOptions(screen.getByLabelText("Action type"), "custom");
+  await user.click(screen.getByRole("button", { name: "Add action" }));
+  await paste(user, "Function signature", "transferPunk(address to, uint punkIndex)");
+  expect(screen.getAllByText(/use transferPunk\(address,uint256\)/).length).toBeGreaterThan(0);
+});
+
+test("custom arguments are never saved in the browser", async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  await user.selectOptions(screen.getByLabelText("Action type"), "custom");
+  await user.click(screen.getByRole("button", { name: "Add action" }));
+  await paste(user, "Function signature", "f(uint256)");
+  await paste(user, "arg 1 (uint256)", "78");
+  const stored = JSON.parse(localStorage.getItem("eth-rescue:draft") ?? "{}");
+  expect(stored.actions[0].signature).toBe("f(uint256)");
+  expect(stored.actions[0].args).toEqual([]);
 });
 
 test("install guide follows the chosen operating system", async () => {

@@ -48,3 +48,24 @@ test("creator contracts are offered only when owner() is the victim", async () =
   expect(contractCandidates(contracts.slice(0, 1), new Map(), VICTIM)[0].blockedReason).toContain("Could not read owner()");
   expect(validatePlan(planWith([ownedCandidate.action]))).toEqual([]);
 });
+
+test("ERC-1155 listings and inexact token IDs are shown but cannot be selected", async () => {
+  const raw = (await fixture("transient-auctions")).results as TransientListing[];
+  const first = raw[0];
+  const erc1155 = {
+    ...first,
+    nft_token: { ...first.nft_token, nft_contract: { ...first.nft_token.nft_contract, contract_type: "ERC1155TL" } },
+  };
+  const inexact = { ...first, nft_token: { ...first.nft_token, token_id: 2 ** 60 } };
+  const [a, b] = listingCandidates([erc1155, inexact], VICTIM);
+  expect(a.blockedReason).toContain("not an ERC-721 listing");
+  expect(b.blockedReason).toContain("cannot be read exactly");
+});
+
+test("an unreadable bid amount counts as a bid", async () => {
+  const [first] = (await fixture("transient-auctions")).results as TransientListing[];
+  for (const highest_bid of ["1e-3", "0.5", "garbage"]) {
+    expect(listingCandidates([{ ...first, highest_bid }], VICTIM)[0].blockedReason).toContain("has a bid");
+  }
+  expect(listingCandidates([{ ...first, highest_bid: "0.0" }], VICTIM)[0].blockedReason).toBeUndefined();
+});

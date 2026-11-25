@@ -4,10 +4,12 @@ import { DiscoverySection, type Scan } from "./components/DiscoverySection";
 import { InstallSection } from "./components/InstallSection";
 import { ReviewSection } from "./components/ReviewSection";
 import { SetupSection } from "./components/SetupSection";
-import { type Draft, draftReducer, emptyDraft, fromPlan, PlanImportError, toPlan } from "./plan/draft";
+import { type Draft, draftReducer, emptyDraft, fromPlan, PlanImportError, staleDiscoveries, toPlan } from "./plan/draft";
+import { importPlan, persistablePlan } from "./plan/importPlan";
 import { validatePlan } from "./plan/validate";
 
-// The draft holds addresses only, never keys, so keeping it across reloads is safe.
+// Kept across reloads: addresses and typed actions. Custom arguments and
+// anything that looks like a secret are left out (see persistablePlan).
 const STORAGE_KEY = "eth-rescue:draft";
 
 function loadStoredDraft(): Draft {
@@ -21,7 +23,7 @@ function loadStoredDraft(): Draft {
 
 function storeDraft(plan: Record<string, unknown>) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(plan));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(persistablePlan(plan)));
   } catch {
     // Storage is a convenience only.
   }
@@ -35,10 +37,11 @@ export function App({ scan }: { scan?: Scan } = {}) {
   const [draft, dispatch] = useReducer(draftReducer, undefined, loadStoredDraft);
   const [revealed, setRevealed] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  const [importNotice, setImportNotice] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const plan = useMemo(() => toPlan(draft), [draft]);
-  const issues = useMemo(() => validatePlan(plan), [plan]);
+  const issues = useMemo(() => [...validatePlan(plan), ...staleDiscoveries(draft)], [plan, draft]);
   const issueByPath = useMemo(() => new Map(issues.map((issue) => [issue.path, issue.message])), [issues]);
 
   useEffect(() => storeDraft(plan), [plan]);
@@ -53,11 +56,27 @@ export function App({ scan }: { scan?: Scan } = {}) {
 
   async function importFile(file: File) {
     setImportError(null);
+    setImportNotice(null);
+    let result;
     try {
-      if (replace(fromPlan(JSON.parse(await file.text())))) setRevealed(true);
+      result = importPlan(await file.text());
     } catch (error) {
-      const reason = error instanceof PlanImportError || error instanceof SyntaxError ? error.message : String(error);
+      const reason = error instanceof PlanImportError ? error.message : String(error);
       setImportError(`Could not import ${file.name}: ${reason}`);
+      return;
+    }
+    if (
+      result.repairs.length > 0 &&
+      !window.confirm(
+        `Importing ${file.name} would change it:\n\n- ${result.repairs.join("\n- ")}\n\nImport the changed plan?`,
+      )
+    ) {
+      return;
+    }
+    if (!replace(result.draft)) return;
+    setRevealed(true);
+    if (result.issues.length > 0) {
+      setImportNotice(`${file.name} has ${result.issues.length} problem(s) as written; they are marked below.`);
     }
   }
 
@@ -99,6 +118,11 @@ export function App({ scan }: { scan?: Scan } = {}) {
       {importError && (
         <p className="banner error" role="alert">
           {importError}
+        </p>
+      )}
+      {importNotice && (
+        <p className="banner" role="status">
+          {importNotice}
         </p>
       )}
       <InstallSection />

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BUILT_IN_KEY, loadUserKey, saveUserKey } from "../discovery/key";
 import type { Candidate, CandidateGroup, ScanRequest, ScanResult } from "../discovery/types";
 import { addressProblem } from "../plan/address";
-import { actionFromPlan, actionKey, actionToPlan, type Draft, type DraftEvent } from "../plan/draft";
+import { actionFromPlan, actionKey, actionToPlan, type Draft, type DraftEvent, discoveryScope } from "../plan/draft";
 import { TextField } from "./Field";
 
 export type Scan = (request: ScanRequest) => Promise<ScanResult>;
@@ -23,7 +23,11 @@ const GROUPS: { group: CandidateGroup; label: string }[] = [
   { group: "tokens", label: "ERC-20 tokens" },
 ];
 
-type Status = { kind: "idle" } | { kind: "scanning" } | { kind: "done"; result: ScanResult };
+type Status =
+  | { kind: "idle" }
+  | { kind: "scanning" }
+  | { kind: "done"; result: ScanResult; scope: string }
+  | { kind: "failed"; message: string };
 
 export function DiscoverySection({ draft, dispatch, scan: runScan = scanWallet }: Props) {
   const [userKey, setUserKey] = useState(loadUserKey);
@@ -31,8 +35,12 @@ export function DiscoverySection({ draft, dispatch, scan: runScan = scanWallet }
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const alchemyKey = userKey || BUILT_IN_KEY;
   const canScan = !addressProblem(draft.victim.trim()) && status.kind !== "scanning";
+  const scope = discoveryScope(draft.network, draft.victim);
+  // Only the latest scan for the current wallet may publish its results.
+  const latest = useRef(0);
 
   useEffect(() => {
+    latest.current += 1;
     setStatus({ kind: "idle" });
     setSelected(new Set());
   }, [draft.network, draft.victim]);
@@ -42,10 +50,18 @@ export function DiscoverySection({ draft, dispatch, scan: runScan = scanWallet }
   const chosen = status.kind === "done" ? status.result.candidates.filter((c) => selected.has(c.key) && selectable(c)) : [];
 
   async function scan() {
+    const id = ++latest.current;
+    const scanScope = scope;
     setStatus({ kind: "scanning" });
-    const result = await runScan({ network: draft.network, victim: draft.victim.trim(), alchemyKey });
-    setSelected(new Set(result.candidates.filter((c) => c.preselect).map((c) => c.key)));
-    setStatus({ kind: "done", result });
+    try {
+      const result = await runScan({ network: draft.network, victim: draft.victim.trim(), alchemyKey });
+      if (id !== latest.current) return;
+      setSelected(new Set(result.candidates.filter((c) => c.preselect).map((c) => c.key)));
+      setStatus({ kind: "done", result, scope: scanScope });
+    } catch (error) {
+      if (id !== latest.current) return;
+      setStatus({ kind: "failed", message: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   function toggle(keys: string[], on: boolean) {
@@ -60,7 +76,9 @@ export function DiscoverySection({ draft, dispatch, scan: runScan = scanWallet }
   }
 
   function addSelected() {
-    dispatch({ kind: "append", actions: chosen.map((candidate) => actionFromPlan(candidate.action)) });
+    if (status.kind !== "done" || status.scope !== scope) return;
+    const actions = chosen.map((candidate) => ({ ...actionFromPlan(candidate.action), discoveredFor: status.scope }));
+    dispatch({ kind: "append", actions });
     toggle(
       chosen.map((candidate) => candidate.key),
       false,
@@ -82,6 +100,11 @@ export function DiscoverySection({ draft, dispatch, scan: runScan = scanWallet }
         <p className="field-hint">Token and NFT lookup needs an Alchemy API key (below). Transient lookup works without one.</p>
       )}
       <AlchemyKeyField userKey={userKey} onChange={(key) => { saveUserKey(key); setUserKey(key); }} />
+      {status.kind === "failed" && (
+        <p className="banner error" role="alert">
+          The scan failed: {status.message}. You can scan again.
+        </p>
+      )}
       {status.kind === "done" && (
         <ScanResults
           result={status.result}
@@ -118,6 +141,17 @@ function ScanResults({ result, selected, inPlan, selectable, toggle }: ResultsPr
           {error.source} lookup failed: {error.message}
         </p>
       ))}
+      {result.warnings.map((warning, index) => (
+        <p key={`${warning.source}-${index}`} className="banner" role="status">
+          {warning.source} results are incomplete: {warning.message}.
+        </p>
+      ))}
+      {result.candidates.length > 0 && (
+        <p className="field-hint">
+          Names come from {Array.from(new Set(result.candidates.map((c) => c.source))).join(" and ")} and can be
+          spoofed. Check each contract address and token ID before adding it.
+        </p>
+      )}
       {result.candidates.length === 0 && <p className="empty">Nothing found.</p>}
       {GROUPS.map(({ group, label }) => {
         const items = result.candidates.filter((candidate) => candidate.group === group);
@@ -153,6 +187,7 @@ function ScanResults({ result, selected, inPlan, selectable, toggle }: ResultsPr
                       <span>
                         <strong>{candidate.title}</strong>
                         <span className="candidate-detail mono">{candidate.detail}</span>
+                        <span className="candidate-note">via {candidate.source}</span>
                         {note && <span className="candidate-note">{note}</span>}
                       </span>
                     </label>

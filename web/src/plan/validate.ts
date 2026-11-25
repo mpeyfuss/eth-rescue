@@ -11,6 +11,7 @@ export interface Issue {
 }
 
 const MAX_UINT256 = 2n ** 256n - 1n;
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const PLAN_ADDRESS_FIELDS = ["victim", "safe", "gas_wallet"];
 const ACTION_ADDRESS_FIELDS = ["contract", "auction_house", "target"];
 const ACTION_UINT_FIELDS = ["amount", "token_id"];
@@ -80,35 +81,53 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function actionIssues(action: unknown, index: number): Issue[] {
-  const prefix = `actions.${index}`;
-  const type = isRecord(action) ? action.type : undefined;
-  const validate = typeof type === "string" ? actionValidators[type] : undefined;
-  if (!validate) return [{ path: joinPath(prefix, "type"), message: "is not a known action type" }];
-  const issues = schemaIssues(validate, action, prefix);
-  if (issues.length > 0 || !isRecord(action)) return issues;
+function addressIssue(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const problem = addressProblem(value);
+  if (problem) return problem;
+  return sameAddress(value, ZERO_ADDRESS) ? "must not be the zero address" : null;
+}
 
+// Field checks run even when the schema already failed elsewhere in the action,
+// so one error never hides another; a path the schema flagged is not repeated.
+function fieldIssues(action: Record<string, unknown>, prefix: string, victim: unknown, flagged: Issue[]): Issue[] {
+  const issues: Issue[] = [];
+  const add = (field: string, message: string) => {
+    const path = joinPath(prefix, field);
+    if (!flagged.some((issue) => issue.path === path)) issues.push({ path, message });
+  };
   for (const field of ACTION_ADDRESS_FIELDS) {
-    const problem = typeof action[field] === "string" ? addressProblem(action[field]) : null;
-    if (problem) issues.push({ path: joinPath(prefix, field), message: problem });
-  }
-  for (const field of ACTION_UINT_FIELDS) {
-    if (typeof action[field] === "string" && BigInt(action[field]) > MAX_UINT256) {
-      issues.push({ path: joinPath(prefix, field), message: "exceeds uint256" });
+    const problem = addressIssue(action[field]);
+    if (problem) add(field, problem);
+    else if (typeof action[field] === "string" && typeof victim === "string" && sameAddress(action[field], victim)) {
+      add(field, "must not be the compromised wallet");
     }
   }
-  if (type === "custom") {
-    const problem = customArgsProblem(action.signature as string, action.args as unknown[]);
-    if (problem) issues.push({ path: joinPath(prefix, "args"), message: problem });
+  for (const field of ACTION_UINT_FIELDS) {
+    const value = action[field];
+    if (typeof value === "string" && /^\d+$/.test(value) && BigInt(value) > MAX_UINT256) add(field, "exceeds uint256");
+  }
+  if (action.type === "custom" && typeof action.signature === "string" && Array.isArray(action.args)) {
+    const problem = customArgsProblem(action.signature, action.args);
+    if (problem) add("args", problem);
   }
   return issues;
+}
+
+function actionIssues(action: unknown, index: number, victim: unknown): Issue[] {
+  const prefix = `actions.${index}`;
+  const type = isRecord(action) ? action.type : undefined;
+  const validate = typeof type === "string" && Object.hasOwn(actionValidators, type) ? actionValidators[type] : undefined;
+  if (!validate || !isRecord(action)) return [{ path: joinPath(prefix, "type"), message: "is not a known action type" }];
+  const issues = schemaIssues(validate, action, prefix);
+  return [...issues, ...fieldIssues(action, prefix, victim, issues)];
 }
 
 function walletIssues(plan: Record<string, unknown>, flagged: Issue[]): Issue[] {
   const issues: Issue[] = [];
   for (const field of PLAN_ADDRESS_FIELDS) {
     if (flagged.some((issue) => issue.path === field)) continue;
-    const problem = typeof plan[field] === "string" ? addressProblem(plan[field]) : null;
+    const problem = addressIssue(plan[field]);
     if (problem) issues.push({ path: field, message: problem });
   }
   if (issues.length > 0 || flagged.some((issue) => PLAN_ADDRESS_FIELDS.includes(issue.path))) return issues;
@@ -127,7 +146,9 @@ export function validatePlan(value: unknown): Issue[] {
     issues.push({ path: "network", message: "is not supported here" });
   }
   issues.push(...walletIssues(value, issues));
-  if (Array.isArray(value.actions)) issues.push(...value.actions.flatMap(actionIssues));
+  if (Array.isArray(value.actions)) {
+    issues.push(...value.actions.flatMap((action, index) => actionIssues(action, index, value.victim)));
+  }
   return issues;
 }
 

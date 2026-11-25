@@ -13,6 +13,7 @@ const candidates: Candidate[] = [
     group: "nfts",
     title: "Frame #3",
     detail: "Before the Frame · ERC-721",
+    source: "Alchemy",
     action: { type: "erc721", contract: NFT, token_id: "3", label: "Frame #3" },
     preselect: true,
   },
@@ -21,12 +22,13 @@ const candidates: Candidate[] = [
     group: "contracts",
     title: "Before the Frame",
     detail: "ERC721TL",
+    source: "Transient",
     action: { type: "ownership", contract: NFT, label: "Before the Frame" },
     preselect: false,
     blockedReason: "Owned by 0x9999, not the compromised wallet.",
   },
 ];
-const scanWallet = mock(async (_request: ScanRequest) => ({ candidates, errors: [] }));
+const scanWallet = mock(async (_request: ScanRequest) => ({ candidates, errors: [], warnings: [] }));
 
 beforeEach(() => {
   localStorage.clear();
@@ -54,4 +56,39 @@ test("scan results can be added to the plan once", async () => {
   expect(plan.actions).toEqual([{ type: "erc721", label: "Frame #3", contract: getAddress(NFT), token_id: "3" }]);
   expect(screen.getByText("Already in the plan.")).toBeDefined();
   expect(screen.queryByRole("button", { name: /to the plan/ })).toBeNull();
+});
+
+test("a scan that finishes after the wallet changed is ignored", async () => {
+  const user = userEvent.setup();
+  let finish: (value: { candidates: Candidate[]; errors: never[]; warnings: never[] }) => void = () => {};
+  const slowScan = mock(
+    (_request: ScanRequest) =>
+      new Promise<{ candidates: Candidate[]; errors: never[]; warnings: never[] }>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  render(<App scan={slowScan} />);
+  const victim = screen.getByLabelText("Compromised wallet");
+  await user.click(victim);
+  await user.paste(VICTIM);
+  await user.click(screen.getByRole("button", { name: "Scan wallet" }));
+  await user.clear(victim);
+  await user.click(victim);
+  await user.paste(getAddress("0x1111111111111111111111111111111111111111"));
+  finish({ candidates, errors: [], warnings: [] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(screen.queryByText("Frame #3")).toBeNull();
+});
+
+test("a scan that throws can be retried", async () => {
+  const user = userEvent.setup();
+  const failing = mock(async (_request: ScanRequest) => {
+    throw new Error("chunk failed to load");
+  });
+  render(<App scan={failing} />);
+  await user.click(screen.getByLabelText("Compromised wallet"));
+  await user.paste(VICTIM);
+  await user.click(screen.getByRole("button", { name: "Scan wallet" }));
+  expect(await screen.findByText(/The scan failed: chunk failed to load/)).toBeDefined();
+  expect(screen.getByRole("button", { name: "Scan wallet" }).hasAttribute("disabled")).toBe(false);
 });

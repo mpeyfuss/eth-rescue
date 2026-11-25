@@ -17,8 +17,8 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { useState } from "react";
 import { BUILT_IN_KEY, loadUserKey } from "../discovery/key";
-import { addressProblem, sameAddress } from "../plan/address";
-import { tryParseSignature } from "../plan/custom";
+import { addressProblem, looksLikeMnemonic, looksLikeSecret, sameAddress } from "../plan/address";
+import { parseSignature, tryParseSignature } from "../plan/custom";
 import {
   ACTION_SPECS,
   ACTION_TYPES,
@@ -55,7 +55,8 @@ const FIELD_HINTS: Partial<Record<keyof typeof FIELD_LABELS, string>> = {
 const TYPE_NOTES: Partial<Record<ActionType, string>> = {
   ownership: "Calls transferOwnership(safe). The contract must be Ownable.",
   transient_delist_erc721: "Delists the token from the Transient auction house, then transfers it to the safe.",
-  custom: "Called as the compromised wallet. Integers may be decimal or 0x; arrays, tuples and booleans are JSON.",
+  custom:
+    "Called as the compromised wallet. Its arguments, not the safe setting, decide where anything goes. The signature must be canonical (uint256, not uint; no names or spaces). Integers may be decimal or 0x; arrays, tuples and booleans are JSON, with large integers quoted.",
 };
 
 const ADDRESS_FIELDS = new Set(["contract", "auction_house", "target"]);
@@ -94,7 +95,10 @@ export function ActionsSection({ draft, dispatch, errorFor }: Props) {
   return (
     <section className="card">
       <h2>3. Assets to rescue</h2>
-      <p className="muted">Actions run in this order. Destinations are always the safe wallet.</p>
+      <p className="muted">
+        Actions run in this order. Typed actions send to the safe wallet; a custom call does exactly what its target
+        and arguments say, so check where it sends anything.
+      </p>
       {actions.length === 0 && <p className="empty">No actions yet.</p>}
       <DndContext
         sensors={sensors}
@@ -190,6 +194,7 @@ function ActionCard({ action, index, count, dispatch, errorFor, network, victim 
         </div>
       </header>
       {TYPE_NOTES[action.type] && <p className="muted">{TYPE_NOTES[action.type]}</p>}
+      {errorFor(prefix, "x") && <p className="field-error">This action {errorFor(prefix, "x")}.</p>}
       {spec.fields.map((field) => (
         <TextField
           key={field}
@@ -237,12 +242,16 @@ interface CustomArgsProps {
 }
 
 function CustomArgs({ action, update, error }: CustomArgsProps) {
-  const inputs = tryParseSignature(action.signature.trim())?.inputs;
-  if (!inputs) {
-    return <p className="muted">Enter a valid function signature to fill in its arguments.</p>;
+  const signature = action.signature.trim();
+  let inputs;
+  try {
+    inputs = parseSignature(signature).inputs;
+  } catch (error) {
+    if (!signature) return <p className="muted">Enter a function signature to fill in its arguments.</p>;
+    return <p className="field-error">{error instanceof Error ? error.message : String(error)}</p>;
   }
   const setArg = (index: number, value: string) =>
-    update({ args: action.args.map((arg, i) => (i === index ? value : arg)) });
+    update({ args: inputs.map((_, i) => (i === index ? value : (action.args[i] ?? ""))) });
 
   return (
     <fieldset className="args">
@@ -256,12 +265,18 @@ function CustomArgs({ action, update, error }: CustomArgsProps) {
           onChange={(value) => setArg(index, value)}
           placeholder={placeholderFor(param.type)}
           mono
-          blockSecrets={false}
+          isSecret={secretCheckFor(param.type)}
         />
       ))}
       {error && <p className="field-error">{error}</p>}
     </fieldset>
   );
+}
+
+// bytes32 values look exactly like private keys, so bytes arguments only block
+// seed phrases. Custom arguments are never saved in this browser either way.
+function secretCheckFor(type: string) {
+  return /^bytes|^tuple|\]$/.test(type) ? looksLikeMnemonic : looksLikeSecret;
 }
 
 function placeholderFor(type: string): string | undefined {

@@ -52,6 +52,7 @@ export interface OwnershipAction {
 }
 export interface TransientDelistErc721Action {
   label?: string | null;
+  gas?: number | null;
   type: "transient_delist_erc721";
   auction_house: string;
   contract: string;

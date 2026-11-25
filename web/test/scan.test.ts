@@ -68,7 +68,7 @@ test("Transient results follow pagination", async () => {
 test("a wallet unknown to Transient finds nothing there", async () => {
   serve(() => ({ next: null, results: [] }));
   const result = await scanWallet({ network: "mainnet", victim: VICTIM, alchemyKey: null });
-  expect(result).toEqual({ candidates: [], errors: [] });
+  expect(result).toEqual({ candidates: [], errors: [], warnings: [] });
   expect(owners).not.toHaveBeenCalled();
 });
 
@@ -111,4 +111,36 @@ test("each network uses its own Transient API", async () => {
   await scanWallet({ network: "mainnet", victim: VICTIM, alchemyKey: null });
   await scanWallet({ network: "sepolia", victim: VICTIM, alchemyKey: null });
   expect(requests).toEqual(["api.transient.xyz/v1/catalog/users", "api-dev.transient.xyz/v1/catalog/users"]);
+});
+
+test("an owner() RPC outage keeps the listings and marks the contracts", async () => {
+  serve(transientRoute(await transient()));
+  const result = await scan({ network: "mainnet", victim: VICTIM, alchemyKey: null }, async () => {
+    throw new Error("rpc down");
+  });
+  expect(result.errors).toEqual([]);
+  expect(result.candidates.filter((c) => c.group === "listings").length).toBeGreaterThan(0);
+  expect(result.candidates.filter((c) => c.group === "contracts").every((c) => c.blockedReason)).toBe(true);
+  expect(result.warnings.map((w) => w.message)).toEqual(["could not read contract owners: rpc down"]);
+});
+
+test("a pagination link to another site is not followed", async () => {
+  const data = await transient();
+  serve((url) => {
+    if (!url.pathname.endsWith("/auctions")) return transientRoute(data)(url, undefined);
+    return { next: "https://evil.example/auctions?offset=100", results: data.auctions.results };
+  });
+  const result = await scanWallet({ network: "mainnet", victim: VICTIM, alchemyKey: null });
+  expect(result.errors[0].message).toContain("another site");
+  expect(requests.some((request) => request.startsWith("evil.example"))).toBe(false);
+});
+
+test("hitting the page limit is reported as incomplete", async () => {
+  const data = await transient();
+  serve((url) => {
+    if (!url.pathname.endsWith("/auctions")) return transientRoute(data)(url, undefined);
+    return { next: `${url.origin}${url.pathname}?offset=${Math.random()}`, results: [] };
+  });
+  const result = await scanWallet({ network: "mainnet", victim: VICTIM, alchemyKey: null });
+  expect(result.warnings.map((w) => w.message)).toContain("only the first 0 auctions were read; there are more");
 });

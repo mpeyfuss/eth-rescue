@@ -1,12 +1,24 @@
 import { getAddress } from "viem";
+import { english } from "viem/accounts";
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
-const PRIVATE_KEY_RE = /^(0x)?[0-9a-fA-F]{64}$/;
-const MNEMONIC_RE = /^([a-z]+\s+){11,23}[a-z]+$/;
+// 64 hex digits anywhere, e.g. "Private key: 0x…" pasted from `gas-wallet new`.
+const PRIVATE_KEY_RE = /(^|[^0-9a-fA-F])(0x)?[0-9a-fA-F]{64}($|[^0-9a-fA-F])/;
+const MNEMONIC_WORDS = new Set(english);
+const MIN_MNEMONIC_WORDS = 12;
+
+export function looksLikeMnemonic(value: string): boolean {
+  let run = 0;
+  for (const word of value.toLowerCase().split(/[^a-z]+/)) {
+    if (!word) continue;
+    run = MNEMONIC_WORDS.has(word) ? run + 1 : 0;
+    if (run >= MIN_MNEMONIC_WORDS) return true;
+  }
+  return false;
+}
 
 export function looksLikeSecret(value: string): boolean {
-  const trimmed = value.trim();
-  return PRIVATE_KEY_RE.test(trimmed) || MNEMONIC_RE.test(trimmed.toLowerCase());
+  return PRIVATE_KEY_RE.test(value) || looksLikeMnemonic(value);
 }
 
 export function addressProblem(value: string): string | null {

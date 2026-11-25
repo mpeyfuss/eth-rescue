@@ -446,3 +446,14 @@ a {
   z-index: 1;
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
 }
+
+.summary ul,
+.summary ol {
+  margin: 0.25rem 0 1rem;
+  padding-left: 1.25rem;
+  overflow-wrap: anywhere;
+}
+
+.summary .custom-call {
+  font-weight: 600;
+}

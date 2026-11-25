@@ -1,4 +1,4 @@
-.PHONY: fmt lint schema test test-unit test-integration test-all
+.PHONY: fmt lint schema test test-unit test-integration test-all web-install web-dev web-test web-build
 
 fmt:
 	uv run ruff format .
@@ -8,6 +8,7 @@ lint:
 
 schema:
 	uv run eth-rescue schema > schema/plan.v1.schema.json
+	cd web && bun run gen:types
 
 test: test-unit
 
@@ -22,4 +23,16 @@ test-integration:
 	RUN_ANVIL_INTEGRATION=1 ANVIL_HARDFORK=osaka uv run pytest -m integration
 	RUN_ANVIL_INTEGRATION=1 ANVIL_HARDFORK=amsterdam uv run pytest -m integration
 
-test-all: test-unit test-integration
+test-all: test-unit test-integration web-test
+
+web-install:
+	cd web && bun install --frozen-lockfile
+
+web-dev:
+	cd web && bun run dev
+
+web-test:
+	cd web && bun run typecheck && bun test
+
+web-build:
+	cd web && bun run build

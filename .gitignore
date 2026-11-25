@@ -13,6 +13,10 @@ out/
 dependencies/
 broadcast/
 
+# Web
+web/node_modules
+*/node_modules
+
 # Virtual environments
 .venv
 

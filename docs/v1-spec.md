@@ -148,6 +148,15 @@ Stack: Vite + React + TypeScript, Bun as package manager and test runner (`bun t
 - Every plan the builder emits is validated against the schema in tests.
 - `examples/*.json` must validate in both Python and TS. This shared fixture set is the cross-language contract test.
 
+### As built (milestone 3)
+
+- One page with three sections (wallets, assets, review) instead of a stepper. The draft autosaves to `localStorage`; it holds addresses only.
+- `web/src/plan/validate.ts` mirrors `parse_plan`: ajv (draft 2020-12, strict off because pydantic's `discriminator` keyword is not ajv's) validates the plan shell and then each action against the `$def` its `type` names, so errors point at one field. On top of the schema it checks address checksums, the uint256 bound, distinct wallets, and that custom args encode (viem, with the CLI's coercion rules).
+- `web/src/plan/types.gen.ts` is generated from the schema (`bun run gen:types`, also run by `make schema`), and a test fails when it is stale.
+- Every text field except custom args refuses input that looks like a private key or seed phrase.
+- A "Before you start" card gives per-OS install steps (uv, then `uvx eth-rescue@latest`) and a copyable prompt for an AI assistant that pins the exact commands and forbids asking for keys. Commands use `@latest` so a cached pre-v1 eth-rescue is never reused.
+- Tests run with `bun test`; DOM tests use happy-dom and Testing Library.
+
 ---
 
 ## 4. Repo layout
@@ -169,7 +178,7 @@ Makefile gains `web-dev`, `web-test`, `web-build`, and `schema`.
 
 1. ✅ **Plan + validate.** `plan.py`, schema export, `validate` and `schema` commands, migrate `examples/`.
 2. ✅ **Dumb CLI.** `bundle.py`/`engine.py` split, reporters, `simulate`/`run`/`gas-wallet new`, delete the wizard, port integration tests.
-3. **Web builder (manual).** Setup, manual actions, review/export, re-import. Usable end to end with no APIs.
+3. ✅ **Web builder (manual).** Setup, manual actions, review/export, re-import. Usable end to end with no APIs.
 4. **Discovery.** Alchemy tokens and NFTs, then Transient.
 5. **Docs + release.** README rewrite, Sepolia rehearsal against the new flow, publish.
 

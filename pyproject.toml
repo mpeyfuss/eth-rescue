@@ -3,6 +3,8 @@ name = "eth-rescue"
 version = "1.0.0"
 description = "Run a JSON rescue plan that moves assets and contract control out of a compromised Ethereum account through private Flashbots bundles."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "eth-abi>=5.2.0",
@@ -15,7 +17,12 @@ dependencies = [
     "web3>=7.16,<8",
 ]
 
+[project.urls]
+Homepage = "https://github.com/mpeyfuss/eth-rescue"
+Issues = "https://github.com/mpeyfuss/eth-rescue/issues"
+
 [tool.uv]
+required-version = ">=0.13.10,<0.14"
 exclude-newer = "7 days"
 
 [tool.pytest.ini_options]

@@ -1,0 +1,12 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Same 7-day delay as uv's exclude-newer, so a compromised release has time to be caught.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]

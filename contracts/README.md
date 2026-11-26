@@ -41,7 +41,7 @@ The gas wallet sends a type-4 transaction to the compromised account (the "victi
 | Network | Address | Runtime codehash |
 | --- | --- | --- |
 | Sepolia | [`0xe9Da4345F6AB43e05FF3DE7999A99Dc30710421A`](https://sepolia.etherscan.io/address/0xe9Da4345F6AB43e05FF3DE7999A99Dc30710421A) | `0x4066e42da7841bead9a6829d601b8219458298865f7562dc5a6a2563dd32474b` |
-| Mainnet | Not yet deployed | |
+| Mainnet | [`0xe9Da4345F6AB43e05FF3DE7999A99Dc30710421A`](https://etherscan.io/address/0xe9Da4345F6AB43e05FF3DE7999A99Dc30710421A) | `0x3e437fbd77867905e360820ecdc27ba719b11b80e2ff1b3f7972d3df599c7382` |
 
 `script/Deploy.s.sol` deploys through [CreateX](https://github.com/pcaversaccio/createx) with a salt that mixes in neither the sender nor the chain, so anyone can deploy the same code to the same address on any chain that has CreateX.
 

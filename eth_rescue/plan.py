@@ -15,7 +15,7 @@ from pydantic import (
 )
 
 from eth_rescue import templates
-from eth_rescue.bundle import MAX_ACTION_GAS
+from eth_rescue.templates import MAX_ACTION_GAS
 from eth_rescue.calldata import (
     CalldataError,
     build_calldata,
@@ -60,6 +60,12 @@ Address = Annotated[
 Uint256 = Annotated[
     str, Field(pattern=r"^[0-9]{1,78}$"), AfterValidator(_check_uint256)
 ]
+# A zero transfer would always "arrive", so its check could never fail.
+Amount = Annotated[
+    str,
+    Field(pattern=r"^0*[1-9][0-9]*$", max_length=78),
+    AfterValidator(_check_uint256),
+]
 Gwei = Annotated[str, Field(pattern=r"^[0-9]+(\.[0-9]{1,9})?$")]
 Gas = Annotated[int, Field(gt=0, le=MAX_ACTION_GAS)]
 NetworkName = Literal["mainnet"]
@@ -80,7 +86,7 @@ class _SingleCallAction(_Action):
 class Erc20Action(_SingleCallAction):
     type: Literal["erc20"]
     contract: Address
-    amount: Uint256
+    amount: Amount
 
 
 class Erc721Action(_SingleCallAction):
@@ -93,7 +99,7 @@ class Erc1155Action(_SingleCallAction):
     type: Literal["erc1155"]
     contract: Address
     token_id: Uint256
-    amount: Uint256
+    amount: Amount
 
 
 class OwnershipAction(_SingleCallAction):
@@ -238,7 +244,8 @@ def _format_validation_error(error: ValidationError) -> str:
     lines = []
     for detail in error.errors():
         location = ".".join(str(part) for part in detail["loc"])
-        lines.append(f"{location}: {detail['msg']}" if location else detail["msg"])
+        message = detail["msg"].removeprefix("Value error, ")
+        lines.append(f"{location}: {message}" if location else message)
     return "\n".join(lines)
 
 

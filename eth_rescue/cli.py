@@ -1,9 +1,14 @@
 import argparse
 import getpass
 import math
+import os
 import sys
 import warnings
 from decimal import Decimal, InvalidOperation
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from typing import NoReturn
+from urllib.parse import urlsplit
 
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
@@ -15,19 +20,27 @@ from eth_rescue.bundle import (
     MAX_GAS_MULTIPLIER,
     MIN_GAS_MULTIPLIER,
 )
-from eth_rescue.engine import ExitCode, RescueContext
+from eth_rescue.engine import HIGH_PRIORITY_FEE_GWEI, ExitCode, RescueContext
 from eth_rescue.networks import NETWORKS, connect
 from eth_rescue.plan import Plan, PlanError, expand, load_plan, render_schema
 from eth_rescue.report import JsonReporter, Reporter, RichReporter
 
 INTERRUPTED = 130
-INTERRUPTED_MESSAGE = (
-    "Interrupted. A bundle that was already submitted may still be included."
-)
+RPC_ENV = "ETH_RESCUE_RPC_URL"
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 class CliError(Exception):
     pass
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    """Usage errors exit 1 (invalid input); argparse's own 2 means
+    "simulation failed" here."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(ExitCode.INVALID, f"{self.prog}: error: {message}\n")
 
 
 def _validate(args: argparse.Namespace) -> int:
@@ -40,6 +53,12 @@ def _validate(args: argparse.Namespace) -> int:
     ui.info(f"Victim:     {plan.victim}")
     ui.info(f"Safe:       {plan.safe}")
     ui.info(f"Gas wallet: {plan.gas_wallet or '(not set)'}")
+    ui.info(f"Extra priority fee: {plan.options.priority_fee_gwei} gwei")
+    if Decimal(plan.options.priority_fee_gwei) > HIGH_PRIORITY_FEE_GWEI:
+        ui.warning(
+            "options.priority_fee_gwei is unusually high and is paid on every gas "
+            "unit; check it for a typo."
+        )
     ui.render_rescue_plan(expand(plan))
     ui.success("Plan is valid.")
     return ExitCode.OK
@@ -50,15 +69,41 @@ def _schema(_: argparse.Namespace) -> int:
     return ExitCode.OK
 
 
-def _new_gas_wallet(_: argparse.Namespace) -> int:
+def _write_new_key(path: Path, key: str) -> None:
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as e:
+        raise CliError(f"{path} already exists; not overwriting it") from e
+    except OSError as e:
+        raise CliError(f"could not create {path}: {e.strerror or e}") from e
+    with os.fdopen(fd, "w") as file:
+        file.write(key + "\n")
+
+
+def _new_gas_wallet(args: argparse.Namespace) -> int:
     account = Account.create()
+    key = to_hex(account.key)
+    if args.out is not None:
+        try:
+            _write_new_key(args.out, key)
+        except CliError as e:
+            ui.error(str(e))
+            return ExitCode.INVALID
     # Plain lines, not a rich panel, so the key never wraps or picks up borders.
     print(f"Address:     {account.address}")
-    print(f"Private key: {to_hex(account.key)}")
-    ui.warning(
-        "Save the private key now; it is not stored anywhere. Put the address in "
-        "your plan as gas_wallet, and keep the key to recover any unused balance."
-    )
+    if args.out is None:
+        print(f"Private key: {key}")
+        ui.warning(
+            "Save the private key now; it is not stored anywhere. Put the address "
+            "in your plan as gas_wallet, and keep the key to recover any unused "
+            "balance."
+        )
+    else:
+        ui.success(
+            f"Private key written to {args.out} (readable only by you). Put the "
+            "address in your plan as gas_wallet, and keep the file to recover any "
+            "unused balance."
+        )
     return ExitCode.OK
 
 
@@ -135,8 +180,21 @@ def _confirm() -> bool:
     sys.stderr.flush()
     try:
         return input().strip().lower() in {"y", "yes"}
-    except EOFError:
+    except (EOFError, KeyboardInterrupt):
+        sys.stderr.write("\n")
         return False
+
+
+def _check_rpc_url(url: str, reporter: Reporter) -> None:
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise CliError("the RPC URL must be an http(s) URL")
+    if parts.scheme == "http" and parts.hostname not in LOCAL_HOSTS:
+        reporter.message(
+            "warning",
+            "The RPC URL is plain http: anyone on the network path can read and "
+            "alter its answers. Prefer https.",
+        )
 
 
 def _context(
@@ -146,7 +204,10 @@ def _context(
     network = NETWORKS[plan.network]
     if network["eth_rescue"] is None or network["eth_rescue_codehash"] is None:
         raise CliError(f"EthRescue is not deployed on {network['label']} yet")
-    w3 = connect(network, Account.create(), rpc=args.rpc)
+    if args.rpc:
+        _check_rpc_url(args.rpc, reporter)
+    # A throwaway relay identity: Flashbots reputation is not worth linking runs.
+    w3 = connect(network, Account.create(), rpc=args.rpc or None)
     reporter.message("info", f"Connected to {network['label']}.")
     victim, gas = read_accounts(plan)
     return plan, RescueContext(
@@ -165,12 +226,26 @@ def _context(
     )
 
 
+def _after_stop(reporter: Reporter, ctx: RescueContext) -> None:
+    if not ctx.progress.sent:
+        reporter.message("warning", "Nothing was sent.")
+        return
+    reporter.message(
+        "warning",
+        "A bundle was already submitted and may still be included. Check the gas "
+        f"wallet {ctx.gas.address} on a block explorer before running again.",
+    )
+
+
 def _rescue(args: argparse.Namespace) -> int:
     reporter: Reporter = JsonReporter() if args.json else RichReporter()
     try:
         plan, ctx = _context(args, reporter)
     except (PlanError, CliError, ConnectionError) as e:
         reporter.message("error", str(e))
+        return ExitCode.INVALID
+    except Exception as e:  # HTTP and RPC errors from the provider
+        reporter.message("error", f"Could not reach the network: {e}")
         return ExitCode.INVALID
 
     rescue_data = expand(plan)
@@ -184,13 +259,26 @@ def _rescue(args: argparse.Namespace) -> int:
             legacy_fallback=plan.options.legacy_fallback,
         )
     except KeyboardInterrupt:
-        reporter.message("warning", INTERRUPTED_MESSAGE)
+        reporter.message("warning", "Interrupted.")
+        _after_stop(reporter, ctx)
         return INTERRUPTED
+    except Exception as e:
+        reporter.message("error", f"Stopped by an unexpected error: {e}")
+        _after_stop(reporter, ctx)
+        return ExitCode.NOT_INCLUDED if ctx.progress.sent else ExitCode.INVALID
 
 
 def _add_rescue_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("plan", help="path to plan.json")
-    parser.add_argument("--rpc", help="override the network's public RPC URL")
+    parser.add_argument(
+        "--rpc",
+        default=os.environ.get(RPC_ENV),
+        metavar="URL",
+        help=(
+            "override the network's public RPC URL. Prefer setting "
+            f"{RPC_ENV}, which keeps an API key out of your shell history"
+        ),
+    )
     parser.add_argument(
         "--json", action="store_true", help="print NDJSON events instead of text"
     )
@@ -215,11 +303,19 @@ def _add_rescue_arguments(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(handler=_rescue)
 
 
+def _version() -> str:
+    try:
+        return version("eth-rescue")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = ArgumentParser(
         prog="eth-rescue",
         description="Rescue assets from a compromised Ethereum account.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     commands = parser.add_subparsers(dest="command", required=True)
 
     validate = commands.add_parser(
@@ -241,9 +337,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     gas_wallet = commands.add_parser("gas-wallet", help="gas wallet utilities")
     gas_wallet_commands = gas_wallet.add_subparsers(dest="gas_command", required=True)
-    gas_wallet_commands.add_parser(
+    new_gas_wallet = gas_wallet_commands.add_parser(
         "new", help="generate a fresh gas wallet"
-    ).set_defaults(handler=_new_gas_wallet)
+    )
+    new_gas_wallet.add_argument(
+        "--out",
+        type=Path,
+        metavar="FILE",
+        help="write the private key to a new file readable only by you, "
+        "instead of printing it",
+    )
+    new_gas_wallet.set_defaults(handler=_new_gas_wallet)
 
     schema = commands.add_parser("schema", help="print the plan JSON Schema")
     schema.set_defaults(handler=_schema)
@@ -256,10 +360,11 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.handler(args))
     except KeyboardInterrupt:
         # Outside a rescue (e.g. at a key prompt); --json output stays NDJSON.
+        message = "Interrupted. Nothing was sent."
         if getattr(args, "json", False):
-            JsonReporter().message("warning", INTERRUPTED_MESSAGE)
+            JsonReporter().message("warning", message)
         else:
-            ui.warning(INTERRUPTED_MESSAGE)
+            ui.warning(message)
         return INTERRUPTED
 
 

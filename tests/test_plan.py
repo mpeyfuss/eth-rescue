@@ -145,6 +145,20 @@ def test_max_uint256_amount_accepted():
             "uint256",
         ),
         (_plan([{"type": "nft", "contract": TOKEN}]), "type"),
+        (_plan([{"type": "erc20", "contract": TOKEN, "amount": "0"}]), "amount"),
+        (
+            _plan(
+                [
+                    {
+                        "type": "erc1155",
+                        "contract": TOKEN,
+                        "token_id": "1",
+                        "amount": "000",
+                    }
+                ]
+            ),
+            "amount",
+        ),
         (
             _plan([ERC721], safe="0x0000000000000000000000000000000000000000"),
             "zero address",
@@ -206,6 +220,8 @@ def test_max_uint256_amount_accepted():
         "zero-gas",
         "amount-overflow",
         "unknown-action-type",
+        "zero-erc20-amount",
+        "zero-erc1155-amount",
         "zero-safe",
         "victim-as-contract",
         "victim-as-custom-target",
@@ -290,3 +306,18 @@ def test_load_plan_rejects_invalid_utf8(tmp_path):
 
     with pytest.raises(PlanError, match="UTF-8"):
         load_plan(path)
+
+
+def test_zero_token_id_is_still_valid():
+    action = {"type": "erc1155", "contract": TOKEN, "token_id": "0", "amount": "1"}
+
+    [call] = expand(parse_plan(_plan([action])))
+
+    assert call["args"][2:4] == [0, 1]
+
+
+def test_validation_messages_drop_pydantic_prefix():
+    with pytest.raises(PlanError) as error:
+        parse_plan(_plan([ERC721], safe=VICTIM))
+
+    assert str(error.value) == "safe must differ from victim"

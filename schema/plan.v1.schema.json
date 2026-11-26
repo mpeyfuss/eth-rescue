@@ -99,7 +99,8 @@
           "type": "string"
         },
         "amount": {
-          "pattern": "^[0-9]{1,78}$",
+          "maxLength": 78,
+          "pattern": "^0*[1-9][0-9]*$",
           "title": "Amount",
           "type": "string"
         }
@@ -153,7 +154,8 @@
           "type": "string"
         },
         "amount": {
-          "pattern": "^[0-9]{1,78}$",
+          "maxLength": 78,
+          "pattern": "^0*[1-9][0-9]*$",
           "title": "Amount",
           "type": "string"
         }

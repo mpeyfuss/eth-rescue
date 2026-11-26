@@ -49,8 +49,12 @@ test("missing fields and empty actions", () => {
 test("action errors carry their index and field", () => {
   expect(paths(plan({}, { amount: "1.5", extra: true }))).toEqual([
     "actions.0.extra: is not a known field",
-    "actions.0.amount: must be a whole number",
+    "actions.0.amount: must be a whole number greater than zero",
   ]);
+});
+
+test("zero amounts are rejected", () => {
+  expect(paths(plan({}, { amount: "0" }))).toEqual(["actions.0.amount: must be a whole number greater than zero"]);
 });
 
 test("unknown action type", () => {

@@ -1,5 +1,4 @@
 import json
-from dataclasses import dataclass
 from typing import Any, NotRequired, TypedDict
 
 import requests
@@ -53,13 +52,6 @@ class RelayRPCError(RelayError):
     def __init__(self, code: int | None, message: str):
         self.code = code
         super().__init__(message)
-
-
-@dataclass(frozen=True)
-class BundleSubmission:
-    transaction_hashes: tuple[HexBytes, ...]
-    target_block_number: int
-    bundle_hash: str
 
 
 def _error_message(response: requests.Response) -> str:
@@ -191,9 +183,8 @@ class RelayClient:
 
         return simulation
 
-    def send_bundle(
-        self, bundle: list[BundleEntry], target_block_number: int
-    ) -> BundleSubmission:
+    def send_bundle(self, bundle: list[BundleEntry], target_block_number: int) -> str:
+        """Submit the bundle for one block; returns the relay's bundle hash."""
         raw_transactions = self._raw_transactions(bundle)
         params = {
             "txs": [tx.to_0x_hex() for tx in raw_transactions],
@@ -202,11 +193,7 @@ class RelayClient:
         if self.builders is not None:
             params["builders"] = self.builders
         result: SendBundleResult = self._request("eth_sendBundle", [params])
-        return BundleSubmission(
-            tuple(self.w3.keccak(tx) for tx in raw_transactions),
-            target_block_number,
-            result["bundleHash"],
-        )
+        return result["bundleHash"]
 
 
 class RelayWeb3(Web3):

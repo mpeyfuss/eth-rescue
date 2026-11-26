@@ -10,7 +10,7 @@ from eth_account.signers.local import LocalAccount
 from eth_utils import to_canonical_address, to_checksum_address, to_hex
 from hexbytes import HexBytes
 from web3 import Web3
-from web3.types import BlockData
+from web3.types import BlockData, BlockIdentifier
 
 from eth_rescue.calldata import build_calldata
 from eth_rescue.contract import (
@@ -21,7 +21,7 @@ from eth_rescue.contract import (
     encode_rescue_call,
     sign_rescue_request,
 )
-from eth_rescue.templates import GAS_GENERIC
+from eth_rescue.templates import GAS_GENERIC, MAX_ACTION_GAS
 from eth_rescue.types import (
     BundleTransaction,
     PreparedAction,
@@ -38,7 +38,6 @@ MAX_ACTIONS_PER_RESCUE = 128  # actions per rescue() call in the 7702 bundle
 # a state-gas reservoir that GAS/gasleft() cannot see, so rescue transactions
 # must never exceed it.
 MAX_TX_GAS = 2**24
-MAX_ACTION_GAS = 8_000_000
 # EthRescue never checks gas itself: only the gas wallet can submit, so these
 # budgets are the only thing standing between a rescue and starved actions.
 # Intrinsic + authorization + request verification + dispatch, excluding the
@@ -105,7 +104,7 @@ def _compute_fees(
     """Return (priority_fee, max_fee_per_gas) from the latest block."""
     if extra_priority_fee_gwei < 0:
         raise ValueError("Extra priority fee cannot be negative")
-    base_fee = int(latest["baseFeePerGas"] * 1.25)
+    base_fee = latest["baseFeePerGas"] * 5 // 4
     priority_fee = w3.eth.max_priority_fee + w3.to_wei(extra_priority_fee_gwei, "gwei")
     max_fee_per_gas = 2 * base_fee + priority_fee
     return priority_fee, max_fee_per_gas
@@ -134,6 +133,7 @@ class _ChainState:
     effective_fee_cap: int
     target_block: int
     timestamp: int
+    block_gas_limit: int
 
 
 def _chain_state(
@@ -155,6 +155,7 @@ def _chain_state(
         ),
         target_block=latest["number"] + TARGET_BLOCK_OFFSET,
         timestamp=latest["timestamp"],
+        block_gas_limit=int(latest["gasLimit"]),
     )
 
 
@@ -320,8 +321,18 @@ def _rescue_batches(
     return batches
 
 
-def check_bundle_limits(transactions: list[BundleTransaction]) -> None:
-    """Refuse a bundle the relay would reject, before anyone funds it."""
+def check_bundle_limits(
+    transactions: list[BundleTransaction],
+    total_gas: int = 0,
+    block_gas_limit: int | None = None,
+) -> None:
+    """Refuse a bundle the relay would reject or no block could hold, before
+    anyone funds it."""
+    if block_gas_limit is not None and total_gas > block_gas_limit:
+        raise BundleLimitError(
+            f"The bundle's gas limits add up to {total_gas:,}, more than a block "
+            f"holds ({block_gas_limit:,}). Split the plan into smaller plans."
+        )
     if len(transactions) > MAX_BUNDLE_TRANSACTIONS:
         raise BundleLimitError(
             f"The bundle needs {len(transactions)} transactions; relays accept at "
@@ -434,9 +445,11 @@ def _sign_7702_undelegation(
     )
 
 
-def delegation_target(w3: Web3, address: str) -> str | None:
+def delegation_target(
+    w3: Web3, address: str, block: BlockIdentifier = "latest"
+) -> str | None:
     """The address `address` delegates to under EIP-7702, or None without code."""
-    code = bytes(w3.eth.get_code(address))
+    code = bytes(w3.eth.get_code(address, block))
     if not code:
         return None
     if len(code) == 23 and code.startswith(DELEGATION_DESIGNATOR_PREFIX):
@@ -599,7 +612,7 @@ def prepare_7702_bundle(
             )
         )
         batch_start += len(batch)
-    check_bundle_limits(transactions)
+    check_bundle_limits(transactions, sum(gas_limits), state.block_gas_limit)
 
     return PreparedBundle(
         transactions=transactions,
@@ -644,6 +657,14 @@ def prepare_bundle(
     sweep_value = max(0, victim_balance + rescue_cost - rescue_fee_cap)
     victim_funding = _victim_funding_value(
         gas_limits, max_fee_per_gas, effective_fee_cap, sweep_gas
+    )
+    # The sweep is signed before anyone knows the gas actually used, so unused
+    # gas stays behind in the compromised wallet.
+    leftover_warning = (
+        "The fallback funds the compromised wallet for every action's full gas "
+        "limit; gas the actions leave unused, up to "
+        f"{Web3.from_wei(rescue_fee_cap, 'ether')} ETH, stays in that wallet, "
+        "where a sweeper can take it."
     )
 
     fees = {
@@ -711,7 +732,12 @@ def prepare_bundle(
                 "sweep", Account.sign_transaction(sweep_tx, victim.key).raw_transaction
             )
         )
-    check_bundle_limits(transactions)
+    sponsor_gas = FUNDING_TX_GAS + (UNDELEGATE_TX_GAS if needs_undelegation else 0)
+    check_bundle_limits(
+        transactions,
+        sponsor_gas + sum(gas_limits) + (sweep_gas if sweep_value else 0),
+        state.block_gas_limit,
+    )
 
     return PreparedBundle(
         transactions=transactions,
@@ -730,4 +756,5 @@ def prepare_bundle(
         ),
         victim_funding=victim_funding,
         sweep_value=sweep_value,
+        warnings=(leftover_warning,),
     )

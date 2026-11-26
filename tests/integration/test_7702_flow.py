@@ -461,3 +461,113 @@ def test_run_waits_for_funding_then_gives_up(
     assert (address, balance) == (unfunded.address, 0)
     assert required > 0
     assert relay.simulated == []
+
+
+def _send_from(w3, account, call):
+    signed = account.sign_transaction(
+        call.build_transaction(
+            {
+                "from": account.address,
+                "nonce": w3.eth.get_transaction_count(account.address),
+            }
+        )
+    )
+    w3.eth.wait_for_transaction_receipt(
+        w3.eth.send_raw_transaction(signed.raw_transaction)
+    )
+
+
+def test_asset_drained_mid_race_fails_while_the_rest_is_rescued(
+    anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx, reporter
+):
+    """The attacker moves an NFT it already holds an approval for, just ahead of
+    the bundle: that action fails in both phases, and nothing else is blocked."""
+    victim, gas, safe = rescue_accounts
+    erc721 = asset_contracts["erc721"]
+    attacker = anvil_w3.eth.accounts[1]
+    _send_from(anvil_w3, victim, erc721.functions.approve(attacker, 1))
+
+    def drain():
+        anvil_w3.eth.wait_for_transaction_receipt(
+            erc721.functions.transferFrom(victim.address, attacker, 1).transact(
+                {"from": attacker}
+            )
+        )
+
+    relay.front_run = drain
+
+    result = engine.run(
+        make_ctx(victim, gas, safe),
+        _asset_matrix(asset_contracts, victim, safe),
+        confirm=_confirm,
+    )
+
+    assert result == ExitCode.UNRESCUED
+    assert _statuses(reporter) == ["rescued", "failed", "rescued", "rescued"]
+    assert erc721.functions.ownerOf(1).call() == attacker
+    assert asset_contracts["erc20"].functions.balanceOf(safe.address).call() == 1_000
+    assert any("Leaving out action #2" in m for m in reporter.messages("warning"))
+
+
+def test_delist_of_an_unlisted_nft_does_not_fail_the_rescue(
+    anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx, reporter
+):
+    victim, gas, safe = rescue_accounts
+    erc721 = asset_contracts["erc721"]
+    calls = templates.transient_auction_house_erc721_rescue(
+        asset_contracts["auction"].address,
+        erc721.address,
+        victim.address,
+        safe.address,
+        1,
+    )
+    for step, call in enumerate(calls):
+        call["plan_action"], call["plan_step"] = 0, step
+
+    result = engine.run(make_ctx(victim, gas, safe), calls, confirm=_confirm)
+
+    assert result == ExitCode.OK
+    assert _statuses(reporter) == ["failed", "rescued"]
+    assert erc721.functions.ownerOf(1).call() == safe.address
+    assert len(reporter.named("phase")) == 1
+
+
+def test_fee_spike_mid_run_waits_for_a_top_up_then_lands(
+    anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx, reporter
+):
+    """The first window does not land and the base fee jumps; the rebuilt
+    bundle needs more than the gas wallet holds, so the run waits for a top-up
+    instead of submitting an underfunded bundle."""
+    victim, gas, safe = rescue_accounts
+    relay.lands = lambda bundle, number: len(relay.sent) > BUNDLE_BLOCK_RANGE
+    state = {"spiked": False, "topped_up": False}
+
+    def rpc(method, *params):
+        anvil_w3.provider.make_request(method, list(params))
+
+    def sleep(_seconds):
+        if relay.sent and not state["spiked"]:
+            state["spiked"] = True
+            [first, *_rest] = reporter.named("bundle")
+            rpc("anvil_setBalance", gas.address, hex(first[0].required_funding))
+            rpc("anvil_setNextBlockBaseFeePerGas", hex(200 * 10**9))
+        elif not state["topped_up"] and any(
+            "dropped below" in m for m in reporter.messages("warning")
+        ):
+            state["topped_up"] = True
+            rpc("anvil_setBalance", gas.address, hex(10 * 10**18))
+        relay.mine_block()
+
+    result = engine.run(
+        make_ctx(victim, gas, safe, sleep=sleep, funding_timeout=60),
+        _asset_matrix(asset_contracts, victim, safe),
+        confirm=_confirm,
+    )
+
+    assert result == ExitCode.OK
+    assert state == {"spiked": True, "topped_up": True}
+    assert any(
+        balance < required for _a, required, balance in reporter.named("funding")
+    )
+    assert len(relay.sent) == 2 * BUNDLE_BLOCK_RANGE
+    assert _statuses(reporter) == ["rescued"] * 4

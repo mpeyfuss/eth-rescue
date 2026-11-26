@@ -11,6 +11,8 @@ GAS_ERC1155 = 200_000
 GAS_OWNERSHIP = 60_000
 GAS_TRANSIENT_DELIST = 300_000
 GAS_GENERIC = 250_000
+# Most gas one action may be given, in a plan or from a live estimate.
+MAX_ACTION_GAS = 8_000_000
 
 
 def erc20_transfer(contract: str, to: str, amount: int) -> RescueData:

@@ -44,3 +44,13 @@ OWNABLE_OWNER_ABI = [
         "type": "function",
     }
 ]
+
+OWNABLE2STEP_PENDING_OWNER_ABI = [
+    {
+        "inputs": [],
+        "name": "pendingOwner",
+        "outputs": [{"name": "pendingOwner", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]

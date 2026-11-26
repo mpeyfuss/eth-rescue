@@ -27,11 +27,6 @@ def _decode(signed_transaction):
     return TypedTransaction.from_bytes(HexBytes(signed_transaction)).as_dict()
 
 
-def _decode_legacy(signed_transaction):
-    raw = HexBytes(signed_transaction)
-    return TypedTransaction.from_bytes(raw).as_dict()
-
-
 def _decode_rescue_call(data):
     assert bytes(data[:4]) == contract.RESCUE_SELECTOR
     return decode(
@@ -45,6 +40,7 @@ class FakeChain:
 
     def __init__(self, victim=None, gas=None, base_fee=10 * GWEI):
         self.chain_id = 1
+        self.gas_limit = 60_000_000
         self.max_priority_fee = 1 * GWEI
         self.base_fee = base_fee
         self.nonces = {}
@@ -60,7 +56,12 @@ class FakeChain:
 
     def get_block(self, tag):
         assert tag == "latest"
-        return {"number": 100, "timestamp": 1_000, "baseFeePerGas": self.base_fee}
+        return {
+            "number": 100,
+            "timestamp": 1_000,
+            "baseFeePerGas": self.base_fee,
+            "gasLimit": self.gas_limit,
+        }
 
     def get_transaction_count(self, address):
         return self.nonces.get(address, 0)
@@ -68,7 +69,7 @@ class FakeChain:
     def get_balance(self, address):
         return self.balances.get(address, 0)
 
-    def get_code(self, address):
+    def get_code(self, address, block_identifier="latest"):
         return self.code.get(address, b"")
 
     def estimate_gas(self, transaction, state_override=None):
@@ -543,8 +544,11 @@ def test_prepare_bundle_shape_fees_and_nonces(chain, accounts):
     ]
     assert [t.action_index for t in prepared.transactions] == [None, None, 0, 1, None]
     _undelegate, fund, first, second, sweep = (
-        _decode_legacy(t.signed_transaction) for t in prepared.transactions
+        _decode(t.signed_transaction) for t in prepared.transactions
     )
+    assert _undelegate["nonce"] == 3
+    assert _undelegate["authorizationList"][0]["nonce"] == 7
+    assert _undelegate["authorizationList"][0]["address"] == bytes(20)
     assert [fund["nonce"], first["nonce"], second["nonce"], sweep["nonce"]] == [
         4,
         8,
@@ -581,7 +585,7 @@ def test_prepare_bundle_gives_contract_safe_sweep_execution_gas(chain, accounts)
 
     prepared = _prepare_legacy(chain, accounts)
 
-    sweep = _decode_legacy(prepared.transactions[-1].signed_transaction)
+    sweep = _decode(prepared.transactions[-1].signed_transaction)
     assert sweep["gas"] == bundle.SWEEP_TX_GAS + bundle.SWEEP_CALL_GAS
 
 
@@ -591,7 +595,7 @@ def test_prepare_bundle_raises_gas_to_the_calldata_floor(chain, accounts):
 
     prepared = _prepare_legacy(chain, accounts, [_action(gas=25_000, data=data)])
 
-    rescue = _decode_legacy(prepared.transactions[1].signed_transaction)
+    rescue = _decode(prepared.transactions[1].signed_transaction)
     assert rescue["gas"] == bundle.calldata_floor_gas(bytes.fromhex(data[2:]))
 
 
@@ -668,3 +672,62 @@ def test_sign_7702_undelegation_builds_type_4_clear_authorization():
     assert authorization["address"] == HexBytes(bundle.ZERO_ADDRESS)
     assert authorization["nonce"] == 9
     assert Account.recover_transaction(raw_tx) == gas.address
+
+
+def test_compute_fees_scales_the_base_fee_exactly():
+    chain = FakeChain()
+    chain.max_priority_fee = 0
+    latest = {"baseFeePerGas": 10**30 + 3}
+
+    _priority_fee, max_fee = bundle._compute_fees(_w3(chain), latest, Decimal(0))
+
+    assert max_fee == 2 * ((10**30 + 3) * 5 // 4)
+
+
+def test_check_bundle_limits_refuses_more_gas_than_a_block_holds():
+    transactions = [bundle.BundleTransaction("rescue", b"\x01")]
+
+    with pytest.raises(bundle.BundleLimitError, match="more than a block holds"):
+        bundle.check_bundle_limits(transactions, 30_000_001, 30_000_000)
+    bundle.check_bundle_limits(transactions, 30_000_000, 30_000_000)
+
+
+def test_prepare_7702_bundle_refuses_gas_beyond_the_block_limit(chain, accounts):
+    chain.gas_limit = 1_000_000
+    actions = [_action(gas=400_000) for _ in range(3)]
+
+    with pytest.raises(bundle.BundleLimitError, match="more than a block holds"):
+        _prepare_7702(chain, accounts, actions)
+
+
+def test_prepare_bundle_refuses_gas_beyond_the_block_limit(chain, accounts):
+    chain.balances[SAFE] = 1
+    chain.gas_limit = 100_000
+
+    with pytest.raises(bundle.BundleLimitError, match="more than a block holds"):
+        _prepare_legacy(chain, accounts, [_action(gas=70_000)])
+
+
+def test_prepare_bundle_warns_how_much_unused_gas_can_be_left_behind(chain, accounts):
+    chain.balances[SAFE] = 1
+
+    prepared = _prepare_legacy(chain, accounts, [_action(gas=50_000)])
+
+    [warning] = prepared.warnings
+    expected = Web3.from_wei(50_000 * prepared.effective_fee_cap, "ether")
+    assert f"up to {expected} ETH" in warning
+
+
+def test_only_the_first_rescue_transaction_pays_for_the_authorization(chain, accounts):
+    chain.balances[SAFE] = 1
+    chain.estimate_result = 8_000_000
+    actions = [_action(gas=21_000) for _ in range(bundle.MAX_ACTIONS_PER_RESCUE + 1)]
+
+    prepared = _prepare_7702(chain, accounts, actions)
+
+    first, second = (_decode(t.signed_transaction) for t in prepared.transactions)
+    multiplier = bundle.TX_ESTIMATE_MULTIPLIER
+    assert first["gas"] == math.ceil(
+        (8_000_000 + bundle.AUTHORIZATION_GAS) * multiplier
+    )
+    assert second["gas"] == math.ceil(8_000_000 * multiplier)

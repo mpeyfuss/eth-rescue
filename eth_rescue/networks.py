@@ -6,8 +6,8 @@ from eth_rescue.types import Network
 
 # `eth_rescue` is the EthRescue deployment victims delegate to and
 # `eth_rescue_codehash` the keccak of its runtime code (deployment-specific,
-# since EIP-712 immutables are embedded). Both stay None until the reviewed
-# build is deployed on that network; the CLI refuses to run without them.
+# since EIP-712 immutables are embedded). The CLI refuses to run on a network
+# without both.
 NETWORKS: dict[str, Network] = {
     "mainnet": {
         "label": "Ethereum mainnet",
@@ -15,8 +15,10 @@ NETWORKS: dict[str, Network] = {
         "relay": "https://relay.flashbots.net",
         "chain_id": 1,
         "builders": BUILDERS,
-        "eth_rescue": None,
-        "eth_rescue_codehash": None,
+        "eth_rescue": "0xe9Da4345F6AB43e05FF3DE7999A99Dc30710421A",
+        "eth_rescue_codehash": (
+            "0x3e437fbd77867905e360820ecdc27ba719b11b80e2ff1b3f7972d3df599c7382"
+        ),
     },
 }
 

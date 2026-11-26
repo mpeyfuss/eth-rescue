@@ -79,3 +79,46 @@ def test_cli_smoke_validate_and_schema():
     assert validated.returncode == 0, validated.stderr
     assert schema.returncode == 0, schema.stderr
     assert json.loads(schema.stdout)["title"]
+
+
+def test_plain_redacts_url_paths_queries_and_credentials():
+    assert (
+        ui.plain(
+            "400 Client Error for url: https://eth-mainnet.g.alchemy.com/v2/SECRET"
+        )
+        == "400 Client Error for url: https://eth-mainnet.g.alchemy.com/…"
+    )
+    assert ui.plain("https://user:SECRET@rpc.example?key=SECRET") == (
+        "https://rpc.example/…"
+    )
+    assert ui.plain("https://relay.flashbots.net/") == "https://relay.flashbots.net"
+
+
+def test_plain_redacts_bare_url_paths_from_connection_errors():
+    text = (
+        "HTTPSConnectionPool(host='mainnet.infura.io', port=443): Max retries "
+        "exceeded with url: /v3/SECRET (Caused by timeout)"
+    )
+
+    assert "SECRET" not in ui.plain(text)
+    assert "with url: /… (Caused by timeout)" in ui.plain(text)
+
+
+def test_json_reporter_redacts_urls():
+    stream = io.StringIO()
+
+    JsonReporter(stream).message("error", "failed: https://rpc.example/v2/SECRET")
+
+    [event] = _events(stream)
+    assert "SECRET" not in event["text"]
+
+
+def test_warnings_and_errors_go_to_stderr(capsys):
+    ui.info("progress")
+    ui.warning("careful")
+    ui.error("broken")
+
+    captured = capsys.readouterr()
+    assert "progress" in captured.out
+    assert "careful" in captured.err and "broken" in captured.err
+    assert "careful" not in captured.out and "broken" not in captured.out

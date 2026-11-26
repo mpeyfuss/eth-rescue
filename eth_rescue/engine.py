@@ -1,6 +1,6 @@
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import IntEnum
 from functools import partial
@@ -42,10 +42,14 @@ DEFAULT_HEAD_TIMEOUT = 5 * 60
 HEAD_POLL_INTERVAL = 1.0
 # Re-reads before deciding a half-visible bundle is genuinely ambiguous.
 INCLUSION_READ_ATTEMPTS = 3
+# Attempts at a chain read before an RPC error ends the run.
+RPC_READ_ATTEMPTS = 5
 # Blocks to keep looking for a bundle after the gas wallet's nonce moved.
 LAGGING_RECEIPT_BLOCKS = 3
 # Consecutive rebuilds (stale target, fee top-ups) allowed without a submission.
 MAX_REBUILDS = 5
+# Extra tip that is almost certainly a typo (e.g. "2500" for "2.5").
+HIGH_PRIORITY_FEE_GWEI = Decimal(50)
 
 
 class ExitCode(IntEnum):
@@ -56,6 +60,13 @@ class ExitCode(IntEnum):
     NOT_INCLUDED = 4
     UNRESCUED = 5
     DECLINED = 6
+
+
+@dataclass
+class RunProgress:
+    """What the CLI needs to describe an interrupted or crashed run."""
+
+    sent: bool = False
 
 
 @dataclass(frozen=True)
@@ -77,6 +88,7 @@ class RescueContext:
     head_poll_interval: float = HEAD_POLL_INTERVAL
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
+    progress: RunProgress = field(default_factory=RunProgress)
 
     def prepare(
         self, preparer: BundlePreparer, prepared: list[PreparedAction]
@@ -95,6 +107,8 @@ class RescueContext:
 class Inclusion:
     bundle: PreparedBundle
     receipts: list[TxReceipt]
+    # Plan call index of each of the bundle's actions, in bundle order.
+    indices: tuple[int, ...] = ()
 
     @property
     def block(self) -> int:
@@ -106,6 +120,8 @@ class InclusionUnknown(RuntimeError):
 
 
 Confirm = Callable[[], bool]
+# Each submitted bundle with the plan call index of each of its actions.
+Submitted = list[tuple[PreparedBundle, tuple[int, ...]]]
 
 
 def wait_for_funding(
@@ -114,10 +130,16 @@ def wait_for_funding(
     if deadline is None:
         deadline = ctx.clock() + ctx.funding_timeout
     while True:
-        balance = ctx.w3.eth.get_balance(ctx.gas.address)
-        ctx.reporter.funding(ctx.gas.address, required, balance)
-        if balance >= required:
-            return True
+        try:
+            balance = ctx.w3.eth.get_balance(ctx.gas.address)
+        except Exception as e:
+            ctx.reporter.message(
+                "warning", f"Could not read the gas wallet balance; retrying: {e}"
+            )
+        else:
+            ctx.reporter.funding(ctx.gas.address, required, balance)
+            if balance >= required:
+                return True
         if ctx.clock() >= deadline:
             ctx.reporter.message("error", "Gas wallet was not funded in time.")
             return False
@@ -193,7 +215,7 @@ def simulate_prepared_bundle(
     return SimulationOutcome(True, bundle=bundle)
 
 
-def _lookup(ctx: RescueContext, bundle: PreparedBundle) -> Inclusion | None:
+def _lookup(ctx: RescueContext, bundle: PreparedBundle) -> list[TxReceipt] | None:
     """The bundle's receipts when all of its transactions sit in one canonical
     block in bundle order; None when none is visible."""
     receipts: list[TxReceipt | None] = []
@@ -216,39 +238,77 @@ def _lookup(ctx: RescueContext, bundle: PreparedBundle) -> Inclusion | None:
     block = ctx.w3.eth.get_block(found[0]["blockNumber"])
     if bytes(block["hash"]) not in block_hashes:
         raise InclusionUnknown("the bundle's block is no longer canonical")
-    return Inclusion(bundle, found)
+    return found
 
 
-def _find_inclusion(
-    ctx: RescueContext, bundles: list[PreparedBundle]
-) -> Inclusion | None:
-    """Look for any submitted bundle on-chain, re-reading inconsistent results a
-    few times (load-balanced RPCs can answer from nodes at different heights)."""
-    for attempt in range(INCLUSION_READ_ATTEMPTS):
+def _scan(ctx: RescueContext, submitted: Submitted) -> Inclusion | None:
+    """The submitted bundle that landed in full. Rebuilds can share signed
+    transactions, so a bundle that is only partly visible is ambiguous only
+    when no other bundle landed in full."""
+    unknown: InclusionUnknown | None = None
+    for bundle, indices in submitted:
         try:
-            for bundle in bundles:
-                inclusion = _lookup(ctx, bundle)
-                if inclusion is not None:
-                    ctx.reporter.included(inclusion.receipts)
-                    return inclusion
-            return None
+            receipts = _lookup(ctx, bundle)
+        except InclusionUnknown as e:
+            unknown = unknown or e
+            continue
+        if receipts is not None:
+            return Inclusion(bundle, receipts, indices)
+    if unknown is not None:
+        raise unknown
+    return None
+
+
+def _find_inclusion(ctx: RescueContext, submitted: Submitted) -> Inclusion | None:
+    """Look for any submitted bundle on-chain, re-reading inconsistent results
+    and RPC errors a few times (load-balanced RPCs can answer from nodes at
+    different heights, and public endpoints drop requests)."""
+    ambiguous = failed = 0
+    while True:
+        try:
+            inclusion = _scan(ctx, submitted)
         except InclusionUnknown:
-            if attempt == INCLUSION_READ_ATTEMPTS - 1:
+            ambiguous += 1
+            if ambiguous >= INCLUSION_READ_ATTEMPTS:
                 raise
-            ctx.sleep(ctx.head_poll_interval)
-    raise AssertionError("unreachable")
+        except Exception:
+            failed += 1
+            if failed >= RPC_READ_ATTEMPTS:
+                raise
+        else:
+            if inclusion is not None:
+                ctx.reporter.included(inclusion.receipts)
+            return inclusion
+        ctx.sleep(ctx.head_poll_interval)
+
+
+def _head(ctx: RescueContext) -> int | None:
+    try:
+        return ctx.w3.eth.block_number
+    except Exception:
+        return None
+
+
+def _block_number(ctx: RescueContext) -> int:
+    for _attempt in range(RPC_READ_ATTEMPTS - 1):
+        head = _head(ctx)
+        if head is not None:
+            return head
+        ctx.sleep(ctx.head_poll_interval)
+    return ctx.w3.eth.block_number
 
 
 def _wait_for_block(ctx: RescueContext, number: int) -> bool:
-    """Wait until the head reaches `number`; False if it stops advancing."""
-    last = ctx.w3.eth.block_number
+    """Wait until the head reaches `number`; False if it stops advancing. A
+    failed read counts as no progress, so only a lasting outage stops it."""
+    last = _head(ctx)
     moved_at = ctx.clock()
-    while last < number:
+    while last is None or last < number:
         if ctx.clock() - moved_at >= ctx.head_timeout:
             return False
         ctx.sleep(ctx.head_poll_interval)
-        current = ctx.w3.eth.block_number
-        if current > last:
+        current = _head(ctx)
+        if current is not None and (last is None or current > last):
             last, moved_at = current, ctx.clock()
     return True
 
@@ -263,9 +323,48 @@ def _unknown(ctx: RescueContext, reason: object) -> ExitCode:
     return ExitCode.NOT_INCLUDED
 
 
+def _give_up(
+    ctx: RescueContext, submitted: Submitted, reason: str, code: ExitCode
+) -> Inclusion | ExitCode:
+    """Stop sending. A bundle already submitted may still show up late, and
+    until it does the outcome is unknown rather than "nothing was sent"."""
+    if not submitted:
+        ctx.reporter.message("error", f"{reason} Nothing was sent.")
+        return code
+    ctx.reporter.message("error", reason)
+    inclusion = _await_lagging_inclusion(ctx, submitted)
+    if inclusion is not None:
+        return inclusion
+    return _unknown(ctx, "an earlier bundle was already submitted")
+
+
+def _droppable(simulation: SimulationOutcome, active: list[int]) -> list[int]:
+    """Plan call indices whose own transactions revert; empty when anything
+    else (funding, undelegation, the relay itself) failed too."""
+    if any(f.role != "rescue" or f.action_index is None for f in simulation.failures):
+        return []
+    return sorted({active[f.action_index] for f in simulation.failures})
+
+
+def _leave_out(ctx: RescueContext, failing: list[int]) -> None:
+    for index in failing:
+        ctx.reporter.message(
+            "warning",
+            f"Leaving out action #{index + 1}: it reverts as a direct transaction.",
+        )
+
+
+def _left_out_outcomes(indices: list[int]) -> list[ActionOutcome]:
+    return [
+        ActionOutcome(index, "failed", "reverted in the fallback simulation")
+        for index in indices
+    ]
+
+
 def _submit(ctx: RescueContext, bundle: PreparedBundle, block_count: int) -> None:
     """Send the bundle for each target block. A failed send may still have
     reached the relay, so the caller watches anyway."""
+    ctx.progress.sent = True
     ctx.reporter.submitting(bundle.target_block, bundle.target_block + block_count - 1)
     for offset in range(block_count):
         target = bundle.target_block + offset
@@ -279,23 +378,24 @@ def _submit(ctx: RescueContext, bundle: PreparedBundle, block_count: int) -> Non
 
 
 def _stale(ctx: RescueContext, bundle: PreparedBundle) -> bool:
-    return ctx.w3.eth.block_number >= bundle.target_block
+    return _block_number(ctx) >= bundle.target_block
 
 
 def _await_lagging_inclusion(
-    ctx: RescueContext, submitted: list[PreparedBundle]
+    ctx: RescueContext, submitted: Submitted
 ) -> Inclusion | None:
-    target = ctx.w3.eth.block_number + LAGGING_RECEIPT_BLOCKS
+    target = _block_number(ctx) + LAGGING_RECEIPT_BLOCKS
     while True:
         inclusion = _find_inclusion(ctx, submitted)
-        if inclusion is not None or ctx.w3.eth.block_number >= target:
+        head = _block_number(ctx)
+        if inclusion is not None or head >= target:
             return inclusion
-        if not _wait_for_block(ctx, ctx.w3.eth.block_number + 1):
+        if not _wait_for_block(ctx, head + 1):
             return None
 
 
 def _watch_window(
-    ctx: RescueContext, submitted: list[PreparedBundle], first: int, count: int
+    ctx: RescueContext, submitted: Submitted, first: int, count: int
 ) -> Inclusion | ExitCode | None:
     for target in range(first, first + count):
         if not _wait_for_block(ctx, target):
@@ -319,40 +419,67 @@ def send_with_retry(
     prepared: list[PreparedAction],
     preparer: BundlePreparer,
     indices: list[int] | None = None,
-) -> Inclusion | ExitCode:
+    *,
+    drop_failing: bool = False,
+) -> Inclusion | ExitCode | None:
     """Rebuild, re-simulate and resubmit for each block window until included.
 
     Only blocks actually submitted count toward `max_blocks`. Every earlier
     bundle is checked before a new one is built, and if the gas wallet's nonce
-    moved without a visible bundle, nothing is resubmitted.
+    moved without a visible bundle, nothing is resubmitted. With
+    `drop_failing`, actions that start reverting in a later window are left out
+    of the next bundle; None means every action was left out before any bundle
+    landed.
     """
-    submitted: list[PreparedBundle] = []
+    active = list(range(len(prepared)) if indices is None else indices)
+    submitted: Submitted = []
+    try:
+        return _send_windows(
+            ctx, dict(zip(active, prepared)), active, preparer, submitted, drop_failing
+        )
+    except InclusionUnknown as e:
+        return _unknown(ctx, e)
+    except Exception as e:  # an RPC outage that outlasted every retry
+        if submitted:
+            return _unknown(ctx, f"RPC error: {e}")
+        ctx.reporter.message("error", f"RPC error: {e}. Nothing was sent.")
+        return ExitCode.INVALID
+
+
+def _send_windows(
+    ctx: RescueContext,
+    by_index: dict[int, PreparedAction],
+    active: list[int],
+    preparer: BundlePreparer,
+    submitted: Submitted,
+    drop_failing: bool,
+) -> Inclusion | ExitCode | None:
     blocks_sent = 0
     rebuilds = 0
     while blocks_sent < ctx.max_blocks:
-        try:
-            inclusion = _find_inclusion(ctx, submitted)
-        except InclusionUnknown as e:
-            return _unknown(ctx, e)
+        inclusion = _find_inclusion(ctx, submitted)
         if inclusion is not None:
             return inclusion
         if rebuilds >= MAX_REBUILDS:
-            ctx.reporter.message(
-                "error", f"Could not get a bundle ready after {rebuilds} rebuilds."
+            return _give_up(
+                ctx,
+                submitted,
+                f"Could not get a bundle ready after {rebuilds} rebuilds.",
+                ExitCode.NOT_INCLUDED,
             )
-            return ExitCode.NOT_INCLUDED
         try:
-            bundle = ctx.prepare(preparer, prepared)
+            bundle = ctx.prepare(preparer, [by_index[i] for i in active])
             gas_balance = ctx.w3.eth.get_balance(ctx.gas.address)
         except Exception as e:
-            ctx.reporter.message("error", f"Could not prepare the next bundle: {e}")
-            return ExitCode.NOT_INCLUDED
+            ctx.reporter.message(
+                "warning", f"Could not prepare the next bundle; retrying: {e}"
+            )
+            rebuilds += 1
+            ctx.sleep(ctx.head_poll_interval)
+            continue
 
-        if submitted and bundle.gas_nonce != submitted[0].gas_nonce:
-            try:
-                inclusion = _await_lagging_inclusion(ctx, submitted)
-            except InclusionUnknown as e:
-                return _unknown(ctx, e)
+        if submitted and bundle.gas_nonce != submitted[0][0].gas_nonce:
+            inclusion = _await_lagging_inclusion(ctx, submitted)
             if inclusion is not None:
                 return inclusion
             return _unknown(
@@ -364,18 +491,29 @@ def send_with_retry(
                 "warning", "Gas wallet balance dropped below requirement (fees rose)."
             )
             if not wait_for_funding(ctx, bundle.required_funding):
-                return ExitCode.UNFUNDED
+                inclusion = _find_inclusion(ctx, submitted)
+                return ExitCode.UNFUNDED if inclusion is None else inclusion
             rebuilds += 1
             continue
 
         if not _stale(ctx, bundle):
-            simulation = simulate_prepared_bundle(ctx, bundle, indices)
+            simulation = simulate_prepared_bundle(ctx, bundle, active)
             if not simulation and not _stale(ctx, bundle):
-                ctx.reporter.message(
-                    "error",
-                    "Submission blocked: the bundle no longer simulates cleanly.",
-                )
-                return ExitCode.SIMULATION_FAILED
+                # The rebuilt bundle reuses the gas wallet's nonce, so a clean
+                # funding transaction means no earlier bundle has landed.
+                failing = _droppable(simulation, active) if drop_failing else []
+                if not failing:
+                    return _give_up(
+                        ctx,
+                        submitted,
+                        "Submission blocked: the bundle no longer simulates cleanly.",
+                        ExitCode.SIMULATION_FAILED,
+                    )
+                _leave_out(ctx, failing)
+                active = [index for index in active if index not in failing]
+                if not active:
+                    return None
+                continue
         if _stale(ctx, bundle):
             ctx.reporter.message(
                 "warning",
@@ -388,19 +526,13 @@ def send_with_retry(
         rebuilds = 0
         block_count = min(BUNDLE_BLOCK_RANGE, ctx.max_blocks - blocks_sent)
         _submit(ctx, bundle, block_count)
-        submitted.append(bundle)
+        submitted.append((bundle, tuple(active)))
         blocks_sent += block_count
-        try:
-            outcome = _watch_window(ctx, submitted, bundle.target_block, block_count)
-        except InclusionUnknown as e:
-            return _unknown(ctx, e)
+        outcome = _watch_window(ctx, submitted, bundle.target_block, block_count)
         if outcome is not None:
             return outcome
 
-    try:
-        inclusion = _await_lagging_inclusion(ctx, submitted)
-    except InclusionUnknown as e:
-        return _unknown(ctx, e)
+    inclusion = _await_lagging_inclusion(ctx, submitted)
     if inclusion is not None:
         return inclusion
     ctx.reporter.message(
@@ -459,12 +591,13 @@ def _fund_and_simulate(
 
 
 def execution_results(
-    inclusion: Inclusion, victim: str, indices: list[int]
+    inclusion: Inclusion, victim: str, indices: list[int], *, trust_logs: bool = True
 ) -> dict[int, bool | None]:
     """Plan call index -> EVM call result, or None when the call never ran.
 
     A rescue-7702 call missing its ActionResult log never executed: its batch
     reverted, or a nonce race skipped the authorization and nothing ran.
+    Without `trust_logs` every rescue-7702 call counts as never run.
     """
     results: dict[int, bool | None] = dict.fromkeys(indices)
     victim = victim.lower()
@@ -472,7 +605,7 @@ def execution_results(
         succeeded = receipt["status"] == 1
         if transaction.role == "rescue" and transaction.action_index is not None:
             results[indices[transaction.action_index]] = succeeded
-        if transaction.role != "rescue-7702" or not succeeded:
+        if transaction.role != "rescue-7702" or not succeeded or not trust_logs:
             continue
         start, size = transaction.batch_start, transaction.batch_size
         for log in receipt["logs"]:
@@ -489,6 +622,32 @@ def execution_results(
                     int.from_bytes(bytes(log["data"])) == 1
                 )
     return results
+
+
+def _logs_trusted(ctx: RescueContext, inclusion: Inclusion) -> bool:
+    """ActionResult logs come from whatever code the compromised wallet runs. If
+    its authorization was skipped, that is still the attacker's code, and its
+    logs prove nothing."""
+    if not any(t.role == "rescue-7702" for t in inclusion.bundle.transactions):
+        return True
+    try:
+        delegate = delegation_target(ctx.w3, ctx.victim.address, inclusion.block)
+    except Exception as e:
+        ctx.reporter.message(
+            "warning",
+            f"Could not read the compromised wallet's delegation at block "
+            f"{inclusion.block}; trusting the rescue's reported results: {e}",
+        )
+        return True
+    if delegate is not None and delegate.lower() == ctx.rescue_contract.lower():
+        return True
+    ctx.reporter.message(
+        "warning",
+        f"At block {inclusion.block} the compromised wallet was delegated to "
+        f"{delegate or 'nothing'}, not EthRescue: its authorization was skipped, "
+        "so the results its code reported are ignored.",
+    )
+    return False
 
 
 def sized_actions(
@@ -529,7 +688,7 @@ def _execute_phase(
     `drop_failing`, calls that revert in simulation are left out (recorded as
     failed) so one unrecoverable asset cannot block the rest."""
     active = list(indices)
-    dropped: list[ActionOutcome] = []
+    dropped: list[int] = []
     while True:
         simulation = _fund_and_simulate(
             ctx, [prepared[i] for i in active], preparer, active
@@ -538,33 +697,17 @@ def _execute_phase(
             return simulation
         if simulation:
             break
-        failing = sorted(
-            {
-                active[f.action_index]
-                for f in simulation.failures
-                if f.role == "rescue" and f.action_index is not None
-            }
-        )
-        blocking = [
-            f
-            for f in simulation.failures
-            if f.role != "rescue" or f.action_index is None
-        ]
-        if not drop_failing or not failing or blocking:
+        failing = _droppable(simulation, active) if drop_failing else []
+        if not failing:
             ctx.reporter.message("error", "Nothing was sent.")
             return ExitCode.SIMULATION_FAILED
-        for index in failing:
-            ctx.reporter.message(
-                "warning",
-                f"Leaving out action #{index + 1}: it reverts as a direct transaction.",
-            )
-            dropped.append(
-                ActionOutcome(index, "failed", "reverted in the fallback simulation")
-            )
+        _leave_out(ctx, failing)
+        dropped += failing
         active = [index for index in active if index not in failing]
         if not active:
-            ctx.reporter.outcomes(rescue_data, dropped)
-            return dropped
+            outcomes = _left_out_outcomes(dropped)
+            ctx.reporter.outcomes(rescue_data, outcomes)
+            return outcomes
 
     if confirm is not None and not confirm():
         ctx.reporter.message("warning", "Aborted. Nothing was sent.")
@@ -573,15 +716,32 @@ def _execute_phase(
     checks = infer_checks(rescue_data)
     active_checks = {index: checks[index] for index in active if index in checks}
     snapshot = snapshot_checks(ctx.w3, active_checks, sleep=ctx.sleep)
-    inclusion = send_with_retry(ctx, [prepared[i] for i in active], preparer, active)
+    inclusion = send_with_retry(
+        ctx,
+        [prepared[i] for i in active],
+        preparer,
+        active,
+        drop_failing=drop_failing,
+    )
     if isinstance(inclusion, ExitCode):
         return inclusion
 
-    executed = execution_results(inclusion, ctx.victim.address, active)
-    outcomes = evaluate_checks(
-        ctx.w3, active_checks, snapshot, executed, inclusion.block, sleep=ctx.sleep
+    landed = inclusion.indices if inclusion is not None else ()
+    dropped += [index for index in active if index not in landed]
+    outcomes: list[ActionOutcome] = []
+    if inclusion is not None:
+        executed = execution_results(
+            inclusion,
+            ctx.victim.address,
+            list(landed),
+            trust_logs=_logs_trusted(ctx, inclusion),
+        )
+        outcomes = evaluate_checks(
+            ctx.w3, active_checks, snapshot, executed, inclusion.block, sleep=ctx.sleep
+        )
+    outcomes = sorted(
+        outcomes + _left_out_outcomes(dropped), key=lambda outcome: outcome.index
     )
-    outcomes = sorted(outcomes + dropped, key=lambda outcome: outcome.index)
     ctx.reporter.outcomes(rescue_data, outcomes)
     return outcomes
 
@@ -649,6 +809,13 @@ def _describe(
         "compromised wallet.",
     )
     say("info", f"Gas wallet: {ctx.gas.address}. It pays every fee.")
+    if ctx.extra_priority_fee_gwei > HIGH_PRIORITY_FEE_GWEI:
+        say(
+            "warning",
+            f"The plan adds {ctx.extra_priority_fee_gwei} gwei of priority fee to "
+            "every gas unit, and the gas wallet must cover it. Check "
+            "options.priority_fee_gwei for a typo before funding.",
+        )
     for index, data in enumerate(rescue_data):
         if data.get("custom"):
             say(
@@ -678,13 +845,48 @@ def _report_final_state(ctx: RescueContext) -> None:
     ctx.reporter.final_state(balance, delegation)
 
 
+def _superseded(
+    rescue_data: list[RescueData], outcomes: dict[int, ActionOutcome]
+) -> set[int]:
+    """Earlier steps of a multi-call plan action (a delist) that had no effect
+    while the action's final step was rescued anyway, so they no longer matter."""
+    last: dict[int, int] = {}
+    for index, data in enumerate(rescue_data):
+        if (action := data.get("plan_action")) is not None:
+            last[action] = index
+    superseded = set()
+    for index, outcome in outcomes.items():
+        action = rescue_data[index].get("plan_action")
+        final = last.get(action) if action is not None else None
+        if (
+            final is not None
+            and final != index
+            and outcome.status in RETRYABLE
+            and final in outcomes
+            and outcomes[final].status == "rescued"
+        ):
+            superseded.add(index)
+    return superseded
+
+
+def _report_superseded(ctx: RescueContext, superseded: set[int]) -> None:
+    for index in sorted(superseded):
+        ctx.reporter.message(
+            "info",
+            f"Action #{index + 1} had no effect, but the step after it was rescued, "
+            "so it is not needed.",
+        )
+
+
 def _finish(
     ctx: RescueContext, rescue_data: list[RescueData], outcomes: list[ActionOutcome]
 ) -> ExitCode:
     _report_final_state(ctx)
     checks = infer_checks(rescue_data)
+    superseded = _superseded(rescue_data, {o.index: o for o in outcomes})
     verified = all(
         outcome.status == "rescued"
+        or outcome.index in superseded
         or (outcome.status == "unverified" and outcome.index not in checks)
         for outcome in outcomes
     )
@@ -767,7 +969,13 @@ def run(
     if isinstance(phase_1, ExitCode):
         return phase_1
     outcomes = {outcome.index: outcome for outcome in phase_1}
-    retry = [index for index in everything if outcomes[index].status in RETRYABLE]
+    superseded = _superseded(rescue_data, outcomes)
+    _report_superseded(ctx, superseded)
+    retry = [
+        index
+        for index in everything
+        if outcomes[index].status in RETRYABLE and index not in superseded
+    ]
 
     if retry and not legacy_fallback:
         ctx.reporter.message(

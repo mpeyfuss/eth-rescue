@@ -39,7 +39,7 @@ class ForkTarget:
 
 def _fork_targets() -> dict[str, ForkTarget]:
     # Sepolia is not a CLI network (its Flashbots relay rarely lands bundles), but
-    # its EthRescue deployment is the one to fork-test until mainnet is pinned.
+    # its EthRescue deployment can still be fork-tested.
     targets = {
         "sepolia": ForkTarget(
             rpc="https://ethereum-sepolia-rpc.publicnode.com",

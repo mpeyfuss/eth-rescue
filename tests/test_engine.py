@@ -9,7 +9,7 @@ from hexbytes import HexBytes
 from web3.exceptions import TransactionNotFound
 
 from eth_rescue import engine, templates
-from eth_rescue.bundle import BUNDLE_BLOCK_RANGE
+from eth_rescue.bundle import BUNDLE_BLOCK_RANGE, BundleLimitError
 from eth_rescue.contract import ACTION_RESULT_TOPIC
 from eth_rescue.engine import ExitCode, Inclusion, RescueContext
 from eth_rescue.types import ActionOutcome, BundleTransaction, PreparedBundle
@@ -19,6 +19,8 @@ GAS = SimpleNamespace(address="0x" + "33" * 20, key=b"\x03" * 32)
 SAFE = "0x" + "22" * 20
 TARGET = "0x" + "44" * 20
 BAD_TARGET = "0x" + "66" * 20
+RESCUE_CONTRACT = "0x" + "55" * 20
+DELEGATED = b"\xef\x01\x00" + bytes.fromhex(RESCUE_CONTRACT[2:])
 BLOCK_TIME = 12
 _serial = itertools.count()
 
@@ -67,6 +69,8 @@ class Chain:
                 "logs": logs,
             }
             self.visible_from[tx_hash] = block + self.receipt_lag
+            if b"rescue-7702" in bytes(entry["signed_transaction"]):
+                self.code[VICTIM.address] = DELEGATED
         self.gas_nonce += 1
 
     def get_transaction_receipt(self, tx_hash):
@@ -81,7 +85,7 @@ class Chain:
     def get_balance(self, address):
         return self.balances.get(address, 0)
 
-    def get_code(self, address):
+    def get_code(self, address, block_identifier="latest"):
         return self.code.get(address, b"")
 
 
@@ -200,7 +204,7 @@ def _ctx(reporter, chain, relay, **overrides):
         "gas": GAS,
         "safe": SAFE,
         "reporter": reporter,
-        "rescue_contract": "0x" + "55" * 20,
+        "rescue_contract": RESCUE_CONTRACT,
         "network": "Testnet",
         "poll_interval": BLOCK_TIME,
         "head_poll_interval": 1,
@@ -538,10 +542,9 @@ def test_execution_results_maps_logs_across_batches_to_plan_indices():
         BundleTransaction("rescue-7702", b"a", batch_start=0, batch_size=2),
         BundleTransaction("rescue-7702", b"b", batch_start=2, batch_size=1),
     ]
-    spoofed = action_logs(True, address="0x" + "99" * 20)
     receipts = [
         {"status": 1, "logs": action_logs(True, False)},
-        {"status": 1, "logs": spoofed + action_logs(True)},
+        {"status": 1, "logs": action_logs(True)},
     ]
 
     results = engine.execution_results(
@@ -549,6 +552,29 @@ def test_execution_results_maps_logs_across_batches_to_plan_indices():
     )
 
     assert results == {3: True, 5: False, 8: True}
+
+
+def test_execution_results_ignores_logs_from_other_addresses():
+    transactions = [BundleTransaction("rescue-7702", b"a", batch_start=0, batch_size=2)]
+    spoofed = action_logs(False, True, address="0x" + "99" * 20)
+    receipts = [{"status": 1, "logs": spoofed + action_logs(True) + spoofed}]
+
+    results = engine.execution_results(
+        _inclusion(transactions, receipts), VICTIM.address, [3, 5]
+    )
+
+    assert results == {3: True, 5: None}
+
+
+def test_execution_results_untrusted_logs_mean_nothing_ran():
+    transactions = [BundleTransaction("rescue-7702", b"a", batch_start=0, batch_size=2)]
+    receipts = [{"status": 1, "logs": action_logs(True, True)}]
+
+    results = engine.execution_results(
+        _inclusion(transactions, receipts), VICTIM.address, [0, 1], trust_logs=False
+    )
+
+    assert results == {0: None, 1: None}
 
 
 def test_execution_results_unlogged_or_reverted_batch_never_ran():
@@ -629,7 +655,7 @@ def test_run_phase_1_success(reporter, chain, monkeypatch, offline):
     assert code is ExitCode.OK
     [(outcomes_data, outcomes)] = reporter.named("outcomes")
     assert [o.status for o in outcomes] == ["unverified", "unverified"]
-    assert reporter.named("final_state") == [(0, None)]
+    assert reporter.named("final_state") == [(0, RESCUE_CONTRACT)]
 
 
 def test_run_retries_only_failed_actions_in_phase_2(
@@ -803,3 +829,586 @@ def test_phase_2_inclusion_unknown_exits_4(reporter, chain, monkeypatch, offline
 
     assert code is ExitCode.NOT_INCLUDED
     assert "legacy fallback did not complete" in reporter.messages("error")[-2]
+
+
+# ---------------------------------------------------------------------------
+# send_with_retry: later windows, RPC errors, ambiguous receipts
+# ---------------------------------------------------------------------------
+TWO_ACTIONS = [
+    {"to": TARGET, "data": "0x", "gas": 50_000},
+    {"to": BAD_TARGET, "data": "0x", "gas": 50_000},
+]
+
+
+def _signed_tx(entries):
+    return [bytes(entry["signed_transaction"]) for entry in entries]
+
+
+def test_fallback_leaves_out_an_action_that_starts_reverting_later(reporter, chain):
+    relay = Relay(chain, land=lambda entries, block: block >= 106)
+    relay.sim_error = lambda signed: (
+        "reverted"
+        if chain.block_number > 101 and BAD_TARGET.encode() in signed
+        else None
+    )
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(
+        ctx, TWO_ACTIONS, preparer_legacy(chain), [3, 7], drop_failing=True
+    )
+
+    assert isinstance(result, Inclusion)
+    assert result.block == 106
+    assert result.indices == (3,)
+    assert not any(
+        BAD_TARGET.encode() in tx for tx in _signed_tx(result.bundle.entries)
+    )
+    assert "Leaving out action #8" in reporter.messages("warning")[-1]
+
+
+def test_fallback_returns_none_when_every_action_is_left_out(reporter, chain):
+    relay = Relay(chain, land=lambda entries, block: False)
+    relay.sim_error = lambda signed: (
+        "reverted" if chain.block_number > 101 and b"|rescue|" in signed else None
+    )
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(
+        ctx, TWO_ACTIONS, preparer_legacy(chain), drop_failing=True
+    )
+
+    assert result is None
+    assert len(relay.sent) == BUNDLE_BLOCK_RANGE
+
+
+def test_fallback_still_stops_when_its_funding_stops_simulating(reporter, chain):
+    relay = Relay(chain, land=lambda entries, block: False)
+    relay.sim_error = lambda signed: (
+        "nonce too low" if chain.block_number > 101 and b"|fund|" in signed else None
+    )
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(
+        ctx, TWO_ACTIONS, preparer_legacy(chain), drop_failing=True
+    )
+
+    assert result is ExitCode.NOT_INCLUDED
+    assert not any("Leaving out" in m for m in reporter.messages("warning"))
+
+
+def test_failed_resimulation_after_submission_is_unknown_not_nothing_sent(
+    reporter, chain
+):
+    relay = Relay(chain, land=lambda entries, block: False)
+    relay.sim_error = (
+        lambda signed: "nonce too low" if chain.block_number > 101 else None
+    )
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(ctx, PREPARED, preparer_legacy(chain))
+
+    assert result is ExitCode.NOT_INCLUDED
+    errors = reporter.messages("error")
+    assert any("no longer simulates" in m for m in errors)
+    assert not any("Nothing was sent" in m for m in errors)
+    assert "Cannot tell whether the rescue landed" in errors[-1]
+    assert len(relay.sent) == BUNDLE_BLOCK_RANGE
+
+
+def test_failed_resimulation_after_submission_finds_a_lagging_bundle(reporter, chain):
+    relay = Relay(chain, land=lambda entries, block: block == 105)
+    chain.receipt_lag = 2
+    relay.sim_error = (
+        lambda signed: "nonce too low" if chain.block_number > 101 else None
+    )
+    stale_nonce = chain.gas_nonce
+    legacy = preparer_legacy(chain)
+
+    def prepare_from_lagging_node(*args):
+        return replace(legacy(*args), gas_nonce=stale_nonce)
+
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(ctx, PREPARED, prepare_from_lagging_node)
+
+    assert isinstance(result, Inclusion)
+    assert result.block == 105
+
+
+def test_newer_bundle_is_found_when_an_older_one_shares_its_transactions(
+    reporter, chain
+):
+    relay = Relay(chain, land=lambda entries, block: block >= 106)
+    shared = BundleTransaction("fund", _signed("fund"))
+
+    def prepare(*args):
+        rescue = BundleTransaction("rescue", _signed("rescue"), action_index=0)
+        return _make_bundle(chain, [shared, rescue])
+
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(ctx, PREPARED, prepare)
+
+    assert isinstance(result, Inclusion)
+    assert result.block == 106
+    assert result.bundle.entries == relay.sent[-1][0]
+
+
+def test_out_of_order_receipts_are_ambiguous(reporter, chain, relay):
+    original = chain.include
+
+    def include_reversed(entries, block, results):
+        original(entries, block, results)
+        for position, entry in enumerate(entries):
+            tx_hash = bytes(keccak(entry["signed_transaction"]))
+            chain.receipts[tx_hash]["transactionIndex"] = len(entries) - position
+
+    chain.include = include_reversed
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(ctx, PREPARED, preparer_legacy(chain))
+
+    assert result is ExitCode.NOT_INCLUDED
+    assert "out of order" in reporter.messages("error")[0]
+    assert len(relay.sent) == BUNDLE_BLOCK_RANGE
+
+
+def test_bundle_split_across_blocks_is_ambiguous(reporter, chain, relay):
+    original = chain.include
+
+    def include_split(entries, block, results):
+        original(entries, block, results)
+        last = bytes(keccak(entries[-1]["signed_transaction"]))
+        chain.receipts[last]["blockHash"] = HexBytes(chain.block_hash(block + 1))
+
+    chain.include = include_split
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(ctx, PREPARED, preparer_legacy(chain))
+
+    assert result is ExitCode.NOT_INCLUDED
+    assert "different blocks" in reporter.messages("error")[0]
+    assert len(relay.sent) == BUNDLE_BLOCK_RANGE
+
+
+def _stale_every(chain, pattern):
+    """A preparer whose bundles target the current block (already stale) when
+    the next value of `pattern` is True."""
+    legacy = preparer_legacy(chain)
+    stale = itertools.cycle(pattern)
+
+    def prepare(*args):
+        bundle = legacy(*args)
+        if next(stale):
+            return replace(bundle, target_block=chain.block_number)
+        return bundle
+
+    return prepare
+
+
+def test_persistently_stale_bundle_gives_up_after_max_rebuilds(reporter, chain, relay):
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(ctx, PREPARED, _stale_every(chain, [True]))
+
+    assert result is ExitCode.NOT_INCLUDED
+    assert reporter.messages("error") == [
+        f"Could not get a bundle ready after {engine.MAX_REBUILDS} rebuilds. "
+        "Nothing was sent."
+    ]
+    assert relay.sent == []
+
+
+def test_rebuild_counter_resets_after_each_submission(reporter, chain):
+    relay = Relay(chain, land=lambda entries, block: block >= 111)
+    ctx = _ctx(reporter, chain, relay, max_blocks=15)
+
+    result = engine.send_with_retry(
+        ctx, PREPARED, _stale_every(chain, [True, True, False])
+    )
+
+    assert isinstance(result, Inclusion)
+    assert result.block == 111
+
+
+def test_prepare_error_is_retried(reporter, chain, relay):
+    legacy = preparer_legacy(chain)
+    failures = iter([ConnectionError("rpc blip")])
+
+    def prepare(*args):
+        if (error := next(failures, None)) is not None:
+            raise error
+        return legacy(*args)
+
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(ctx, PREPARED, prepare)
+
+    assert isinstance(result, Inclusion)
+    assert "retrying: rpc blip" in reporter.messages("warning")[0]
+
+
+def test_persistent_prepare_error_gives_up_without_sending(reporter, chain, relay):
+    def prepare(*args):
+        raise ConnectionError("rpc down")
+
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(ctx, PREPARED, prepare)
+
+    assert result is ExitCode.NOT_INCLUDED
+    assert relay.sent == []
+    assert "Nothing was sent" in reporter.messages("error")[-1]
+
+
+def test_transient_receipt_errors_are_ridden_out(reporter, chain, relay):
+    lookup = chain.get_transaction_receipt
+    blips = iter(range(engine.RPC_READ_ATTEMPTS - 1))
+
+    def flaky(tx_hash):
+        if chain.block_number >= 101 and next(blips, None) is not None:
+            raise ConnectionError("502 Bad Gateway")
+        return lookup(tx_hash)
+
+    chain.get_transaction_receipt = flaky
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(ctx, PREPARED, preparer_legacy(chain))
+
+    assert isinstance(result, Inclusion)
+    assert len(relay.sent) == BUNDLE_BLOCK_RANGE
+
+
+def test_lasting_rpc_outage_after_submission_is_unknown(reporter, chain):
+    relay = Relay(chain, land=lambda entries, block: False)
+
+    def down(tx_hash):
+        raise ConnectionError("for url: https://eth.example/v2/SECRET")
+
+    chain.get_transaction_receipt = down
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(ctx, PREPARED, preparer_legacy(chain))
+
+    assert result is ExitCode.NOT_INCLUDED
+    assert "Cannot tell whether the rescue landed" in reporter.messages("error")[-1]
+    assert len(relay.sent) == BUNDLE_BLOCK_RANGE
+    assert ctx.progress.sent
+
+
+class FlakyHead:
+    """web3.eth whose block_number read fails every third time."""
+
+    def __init__(self, chain):
+        self._chain = chain
+        self.reads = 0
+
+    def __getattr__(self, name):
+        return getattr(self._chain, name)
+
+    @property
+    def block_number(self):
+        self.reads += 1
+        if self.reads % 3 == 0:
+            raise ConnectionError("timeout")
+        return self._chain.block_number
+
+
+def test_flaky_block_number_reads_do_not_end_the_run(reporter, chain):
+    relay = Relay(chain, land=lambda entries, block: block >= 107)
+    ctx = _ctx(
+        reporter, chain, relay, w3=SimpleNamespace(eth=FlakyHead(chain), relay=relay)
+    )
+
+    result = engine.send_with_retry(ctx, PREPARED, preparer_legacy(chain))
+
+    assert isinstance(result, Inclusion)
+    assert result.block == 107
+
+
+def test_submission_marks_progress_as_sent(reporter, chain, relay):
+    ctx = _ctx(reporter, chain, relay)
+    assert not ctx.progress.sent
+
+    engine.send_with_retry(ctx, PREPARED, preparer_legacy(chain))
+
+    assert ctx.progress.sent
+
+
+def test_wait_for_funding_rides_out_balance_read_errors(reporter, chain, relay):
+    balances = iter([ConnectionError("blip"), 10**18])
+
+    def get_balance(address):
+        value = next(balances)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    chain.get_balance = get_balance
+    ctx = _ctx(reporter, chain, relay)
+
+    assert engine.wait_for_funding(ctx, 1000)
+    assert "Could not read the gas wallet balance" in reporter.messages("warning")[0]
+
+
+def test_simulation_revert_field_is_a_failure(reporter, chain, relay):
+    original = relay.simulate
+
+    def reverting(entries, block_tag=None):
+        result = original(entries, block_tag)
+        result["results"][1]["revert"] = "ERC20: insufficient balance"
+        return result
+
+    relay.simulate = reverting
+    ctx = _ctx(reporter, chain, relay)
+    bundle = preparer_legacy(chain)(None, None, None, PREPARED, SAFE, 0)
+
+    outcome = engine.simulate_prepared_bundle(ctx, bundle)
+
+    assert not outcome
+    assert outcome.failures[0].role == "rescue"
+    assert "insufficient balance" in reporter.messages("error")[0]
+
+
+# ---------------------------------------------------------------------------
+# run: phases, trust, supersession
+# ---------------------------------------------------------------------------
+def test_run_phase_1_simulation_failure_sends_nothing(
+    reporter, chain, monkeypatch, offline
+):
+    _use_7702(monkeypatch, chain)
+    relay = Relay(chain)
+    relay.sim_error = lambda signed: "reverted" if b"rescue-7702" in signed else None
+    confirms = []
+    ctx = _ctx(reporter, chain, relay)
+
+    code = engine.run(ctx, [_custom()], confirm=lambda: confirms.append(1) or True)
+
+    assert code is ExitCode.SIMULATION_FAILED
+    assert relay.sent == []
+    assert confirms == []
+    assert reporter.named("outcomes") == []
+    assert not ctx.progress.sent
+
+
+def test_phase_2_stops_when_its_fund_transaction_fails_simulation(
+    reporter, chain, monkeypatch, offline
+):
+    _use_7702(monkeypatch, chain)
+    relay = Relay(chain, outcome=lambda entries: [(1, action_logs(False))])
+    relay.sim_error = (
+        lambda signed: "insufficient funds" if b"|fund|" in signed else None
+    )
+    ctx = _ctx(reporter, chain, relay)
+
+    code = engine.run(ctx, [_custom()], confirm=lambda: True)
+
+    assert code is ExitCode.UNRESCUED
+    assert not any("Leaving out" in m for m in reporter.messages("warning"))
+    assert "legacy fallback did not complete" in " ".join(reporter.messages("error"))
+
+
+def test_phase_2_leaves_out_an_action_that_reverts_in_a_later_window(
+    reporter, chain, monkeypatch, offline
+):
+    _use_7702(monkeypatch, chain)
+
+    def land(entries, block):
+        if b"rescue-7702" in bytes(entries[0]["signed_transaction"]):
+            return True
+        return block >= 108
+
+    relay = Relay(
+        chain,
+        land=land,
+        outcome=lambda entries: (
+            [(1, action_logs(False, False))]
+            if b"rescue-7702" in bytes(entries[0]["signed_transaction"])
+            else [(1, [])] * len(entries)
+        ),
+    )
+    phase_2_started = []
+    relay.sim_error = lambda signed: (
+        "reverted"
+        if BAD_TARGET.encode() in signed and len(phase_2_started) > 1
+        else None
+    )
+    original_simulate = relay.simulate
+
+    def simulate(entries, block_tag=None):
+        if b"|fund|" in bytes(entries[0]["signed_transaction"]):
+            phase_2_started.append(block_tag)
+        return original_simulate(entries, block_tag)
+
+    relay.simulate = simulate
+    ctx = _ctx(reporter, chain, relay)
+
+    code = engine.run(ctx, [_custom(), _custom(BAD_TARGET)], confirm=lambda: True)
+
+    assert code is ExitCode.UNRESCUED
+    final = reporter.named("outcomes")[-1][1]
+    assert [(o.index, o.status) for o in final] == [(0, "unverified"), (1, "failed")]
+    assert any("Leaving out action #2" in m for m in reporter.messages("warning"))
+
+
+def test_run_ignores_logs_when_the_authorization_was_skipped(
+    reporter, chain, monkeypatch, offline
+):
+    _use_7702(monkeypatch, chain)
+    relay = Relay(chain, outcome=lambda entries: [(1, action_logs(True))])
+    original = chain.include
+
+    def attacker_keeps_delegation(entries, block, results):
+        original(entries, block, results)
+        chain.code[VICTIM.address] = b"\xef\x01\x00" + b"\x99" * 20
+
+    chain.include = attacker_keeps_delegation
+    ctx = _ctx(reporter, chain, relay)
+
+    code = engine.run(ctx, [_custom()], confirm=lambda: True, legacy_fallback=False)
+
+    assert code is ExitCode.UNRESCUED
+    [(_data, outcomes)] = reporter.named("outcomes")
+    assert [o.status for o in outcomes] == ["not_executed"]
+    assert any("authorization was skipped" in m for m in reporter.messages("warning"))
+
+
+def _typed(monkeypatch, outcomes):
+    monkeypatch.setattr(engine, "snapshot_checks", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        engine, "evaluate_checks", lambda *args, **kwargs: list(outcomes)
+    )
+
+
+def test_run_never_retries_partial_or_unverified_actions(
+    reporter, chain, monkeypatch, offline
+):
+    _use_7702(monkeypatch, chain)
+    _typed(
+        monkeypatch,
+        [ActionOutcome(0, "partial", "only 1 of 2"), ActionOutcome(1, "unverified")],
+    )
+    relay = Relay(chain, outcome=lambda entries: [(1, action_logs(True, True))])
+    ctx = _ctx(reporter, chain, relay)
+
+    code = engine.run(
+        ctx,
+        [
+            templates.erc20_transfer(TARGET, SAFE, 2),
+            templates.erc20_transfer(TARGET, SAFE, 1),
+        ],
+        confirm=lambda: True,
+    )
+
+    assert code is ExitCode.UNRESCUED
+    assert not any(
+        b"|fund|" in bytes(e[0]["signed_transaction"]) for e, _t in relay.sent
+    )
+    assert reporter.named("phase") == [("Phase 1: EIP-7702 rescue",)]
+
+
+def _delist_then_transfer():
+    calls = templates.transient_auction_house_erc721_rescue(
+        BAD_TARGET, TARGET, VICTIM.address, SAFE, 12
+    )
+    for step, call in enumerate(calls):
+        call["plan_action"], call["plan_step"] = 0, step
+    return calls
+
+
+def test_failed_delist_is_superseded_when_its_nft_was_rescued(
+    reporter, chain, monkeypatch, offline
+):
+    _use_7702(monkeypatch, chain)
+    _typed(
+        monkeypatch,
+        [ActionOutcome(0, "failed", "the call reverted"), ActionOutcome(1, "rescued")],
+    )
+    relay = Relay(chain, outcome=lambda entries: [(1, action_logs(False, True))])
+    ctx = _ctx(reporter, chain, relay)
+
+    code = engine.run(ctx, _delist_then_transfer(), confirm=lambda: True)
+
+    assert code is ExitCode.OK
+    assert not any(
+        b"|fund|" in bytes(e[0]["signed_transaction"]) for e, _t in relay.sent
+    )
+    assert any("not needed" in m for m in reporter.messages("info"))
+
+
+def test_failed_delist_is_retried_when_its_nft_was_not_rescued(
+    reporter, chain, monkeypatch, offline
+):
+    _use_7702(monkeypatch, chain)
+    _typed(
+        monkeypatch,
+        [
+            ActionOutcome(0, "failed", "reverted"),
+            ActionOutcome(1, "failed", "owned by x"),
+        ],
+    )
+    relay = Relay(
+        chain,
+        outcome=lambda entries: (
+            [(1, action_logs(False, False))]
+            if len(entries) == 1
+            else [(1, [])] * len(entries)
+        ),
+    )
+    ctx = _ctx(reporter, chain, relay)
+
+    code = engine.run(ctx, _delist_then_transfer(), confirm=lambda: True)
+
+    assert code is ExitCode.UNRESCUED
+    phase_2 = [
+        e for e, _t in relay.sent if b"|fund|" in bytes(e[0]["signed_transaction"])
+    ]
+    assert phase_2 and len(phase_2[0]) == 3
+
+
+@pytest.mark.parametrize(
+    ("overrides", "actions"),
+    [
+        ({"safe": GAS.address}, [TARGET]),
+        ({"safe": "0x" + "00" * 20}, [TARGET]),
+        ({}, ["0x" + "00" * 20]),
+    ],
+)
+def test_preflight_rejects_bad_roles(
+    reporter, chain, relay, offline, overrides, actions
+):
+    ctx = _ctx(reporter, chain, relay, **overrides)
+
+    code = engine.run(ctx, [_custom(a) for a in actions], confirm=lambda: True)
+
+    assert code is ExitCode.INVALID
+    assert relay.simulated == []
+
+
+def test_prepare_error_before_funding_fails_simulation(
+    reporter, chain, monkeypatch, offline
+):
+    def too_big(*args, **kwargs):
+        raise BundleLimitError("The bundle is too large")
+
+    monkeypatch.setattr(engine, "prepare_7702_bundle", too_big)
+    relay = Relay(chain)
+    ctx = _ctx(reporter, chain, relay)
+
+    code = engine.simulate(ctx, [_custom()])
+
+    assert code is ExitCode.SIMULATION_FAILED
+    assert reporter.named("funding") == []
+    assert "too large" in reporter.messages("error")[0]
+
+
+def test_describe_warns_about_a_typo_sized_priority_fee(
+    reporter, chain, monkeypatch, offline
+):
+    _use_7702(monkeypatch, chain)
+    relay = Relay(chain)
+    ctx = _ctx(reporter, chain, relay, extra_priority_fee_gwei=Decimal(2500))
+
+    engine.simulate(ctx, [_custom()])
+
+    assert any("priority_fee_gwei" in m for m in reporter.messages("warning"))

@@ -11,6 +11,7 @@ from eth_rescue.abi import (
     ERC20_BALANCE_OF_ABI,
     ERC721_OWNER_OF_ABI,
     ERC1155_BALANCE_OF_ABI,
+    OWNABLE2STEP_PENDING_OWNER_ABI,
     OWNABLE_OWNER_ABI,
 )
 from eth_rescue.types import ActionOutcome, CheckKind, RescueData
@@ -183,6 +184,20 @@ def _evaluate_balance(index: int, check: Check, balances: _Balances) -> ActionOu
     return ActionOutcome(index, "partial", f"only {got} of {wanted} arrived")
 
 
+def _pending_owner(w3: Web3, check: Check, block: int, sleep) -> str | None:
+    """Ownable2Step's pending owner, or None when the contract has none."""
+    contract = w3.eth.contract(
+        address=check.contract, abi=OWNABLE2STEP_PENDING_OWNER_ABI
+    )
+    fn = contract.functions.pendingOwner()
+    try:
+        return to_checksum_address(
+            _read(lambda: fn.call(block_identifier=block), sleep)
+        )
+    except (ReadUnavailable, ReadReverted):
+        return None
+
+
 def _evaluate_owner(w3, index: int, check: Check, block, sleep) -> ActionOutcome:
     try:
         owner = _owner(w3, check, block, sleep)
@@ -196,6 +211,16 @@ def _evaluate_owner(w3, index: int, check: Check, block, sleep) -> ActionOutcome
         )
     if owner == check.recipient:
         return ActionOutcome(index, "rescued")
+    if (
+        check.kind == "ownership"
+        and _pending_owner(w3, check, block, sleep) == check.recipient
+    ):
+        return ActionOutcome(
+            index,
+            "partial",
+            "the safe is the pending owner (Ownable2Step): call acceptOwnership() "
+            "from the safe to finish",
+        )
     return ActionOutcome(index, "failed", f"owned by {owner}")
 
 

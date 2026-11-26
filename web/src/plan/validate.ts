@@ -62,6 +62,7 @@ function describe(error: ErrorObject): { field: string; message: string } {
 function patternMessage(pattern: string): string {
   if (pattern.includes("{40}")) return "must be a 0x address with 40 hex characters";
   if (pattern.includes("{1,78}")) return "must be a whole number";
+  if (pattern.includes("[1-9]")) return "must be a whole number greater than zero";
   if (pattern.includes("{1,9}")) return "must be a gwei amount with at most 9 decimals";
   if (pattern.includes("\\(")) return "must look like name(type,...)";
   return `must match ${pattern}`;

@@ -16,18 +16,35 @@ from eth_rescue.types import (
 )
 
 console = Console()
+# Warnings and errors stay visible when stdout is redirected.
+err_console = Console(stderr=True)
 
 # 65 bytes or more of hex is a signature, a signed transaction or raw calldata:
 # never useful in a message, and possibly sensitive.
 LONG_HEX_RE = re.compile(r"0x[0-9a-fA-F]{130,}")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# RPC URLs often carry an API key in the path, query or userinfo, and HTTP
+# client errors repeat them; only the scheme and host are kept.
+URL_RE = re.compile(
+    r"\b([a-z][a-z0-9+.-]*://)(?:[^\s/@]+@)?([^\s/?#'\"]+)([^\s'\")]*)", re.I
+)
+# urllib3 errors name the path on its own ("with url: /v2/<key>").
+URL_PATH_RE = re.compile(r"(\burl: )/[^\s)]*", re.I)
 MAX_MESSAGE_LENGTH = 2_000
+
+
+def _redact_url(match: re.Match[str]) -> str:
+    scheme, host, rest = match.groups()
+    return f"{scheme}{host}" if rest in ("", "/") else f"{scheme}{host}/…"
 
 
 def plain(text: Any) -> str:
     """Untrusted text (labels, provider and relay errors) made safe to print:
-    no terminal control sequences, no long hex blobs, bounded length."""
+    no terminal control sequences, no URL paths or credentials, no long hex
+    blobs, bounded length."""
     cleaned = CONTROL_RE.sub("", str(text))
+    cleaned = URL_RE.sub(_redact_url, cleaned)
+    cleaned = URL_PATH_RE.sub(r"\1/…", cleaned)
     cleaned = LONG_HEX_RE.sub(
         lambda m: f"0x…({(len(m.group()) - 2) // 2} bytes hidden)", cleaned
     )
@@ -53,11 +70,11 @@ def success(message: str) -> None:
 
 
 def warning(message: str) -> None:
-    console.print(f"[yellow]WARN[/yellow] {escape(plain(message))}")
+    err_console.print(f"[yellow]WARN[/yellow] {escape(plain(message))}")
 
 
 def error(message: str) -> None:
-    console.print(f"[red]ERROR[/red] {escape(plain(message))}")
+    err_console.print(f"[red]ERROR[/red] {escape(plain(message))}")
 
 
 def ether(wei: int) -> str:
@@ -169,8 +186,8 @@ def render_outcome_report(
         )
     if any(o.status == "partial" for o in outcomes):
         warning(
-            "Partially delivered actions are not retried automatically, so the "
-            "remainder is not sent twice. Check the balances and rerun if needed."
+            "Partial actions are not retried automatically, so nothing is sent "
+            "twice. Follow each one's detail, and rerun with a new plan if needed."
         )
     console.print()
 

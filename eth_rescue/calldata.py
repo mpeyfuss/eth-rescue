@@ -94,12 +94,18 @@ def _to_bytes(value: Any, size: int | None, path: str) -> bytes:
     return data
 
 
+def has_valid_checksum(address: str) -> bool:
+    """False only for a mixed-case address with a wrong EIP-55 checksum
+    (eth_utils' is_address no longer rejects those)."""
+    digits = address[2:]
+    mixed_case = digits != digits.lower() and digits != digits.upper()
+    return not mixed_case or is_checksum_address(address)
+
+
 def _to_address(value: Any, path: str) -> str:
     if not isinstance(value, str) or not ADDRESS_RE.match(value):
         raise CalldataError(f"{path}: expected a 0x address with 40 hex characters")
-    digits = value[2:]
-    mixed_case = digits != digits.lower() and digits != digits.upper()
-    if mixed_case and not is_checksum_address(value):
+    if not has_valid_checksum(value):
         raise CalldataError(f"{path}: invalid address checksum")
     return to_checksum_address(value)
 

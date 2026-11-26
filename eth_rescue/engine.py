@@ -12,10 +12,10 @@ from web3.types import TxReceipt
 from eth_rescue.bundle import (
     BUNDLE_BLOCK_RANGE,
     DEFAULT_GAS_MULTIPLIER,
-    MAX_BUNDLE_TRANSACTIONS,
+    MAX_LEGACY_ACTIONS,
+    ZERO_ADDRESS,
     BundlePreparer,
     delegation_target,
-    legacy_bundle_transaction_count,
     prepare_7702_bundle,
     prepare_actions,
     prepare_bundle,
@@ -46,7 +46,6 @@ INCLUSION_READ_ATTEMPTS = 3
 LAGGING_RECEIPT_BLOCKS = 3
 # Consecutive rebuilds (stale target, fee top-ups) allowed without a submission.
 MAX_REBUILDS = 5
-ZERO_ADDRESS = "0x" + "0" * 40
 
 
 class ExitCode(IntEnum):
@@ -162,9 +161,7 @@ def simulate_prepared_bundle(
             "Relay simulation response did not include every bundle transaction"
         )
         ctx.reporter.message("error", failure.message)
-        return SimulationOutcome(
-            False, bundle=bundle, result=result, failures=(failure,)
-        )
+        return SimulationOutcome(False, bundle=bundle, failures=(failure,))
     for transaction, tx_result in zip(bundle.transactions, tx_results):
         reported = tx_result.get("txHash")
         if reported and not _same_hash(reported, transaction.hash):
@@ -172,15 +169,12 @@ def simulate_prepared_bundle(
                 "Relay simulated a different transaction than the one signed"
             )
             ctx.reporter.message("error", failure.message)
-            return SimulationOutcome(
-                False, bundle=bundle, result=result, failures=(failure,)
-            )
+            return SimulationOutcome(False, bundle=bundle, failures=(failure,))
 
     ctx.reporter.simulation(result)
     failures = tuple(
         SimulationFailure(
             str(tx_result.get("error") or tx_result.get("revert")),
-            transaction_index=index,
             role=bundle.transactions[index].role,
             action_index=bundle.transactions[index].action_index,
         )
@@ -193,10 +187,10 @@ def simulate_prepared_bundle(
             f"Simulation failed at {_failure_label(failure, indices)}: {failure.message}",
         )
     if failures:
-        return SimulationOutcome(False, bundle=bundle, result=result, failures=failures)
+        return SimulationOutcome(False, bundle=bundle, failures=failures)
 
     ctx.reporter.message("success", "Simulation succeeded.")
-    return SimulationOutcome(True, bundle=bundle, result=result)
+    return SimulationOutcome(True, bundle=bundle)
 
 
 def _lookup(ctx: RescueContext, bundle: PreparedBundle) -> Inclusion | None:
@@ -242,7 +236,7 @@ def _find_inclusion(
             if attempt == INCLUSION_READ_ATTEMPTS - 1:
                 raise
             ctx.sleep(ctx.head_poll_interval)
-    return None
+    raise AssertionError("unreachable")
 
 
 def _wait_for_block(ctx: RescueContext, number: int) -> bool:
@@ -269,22 +263,19 @@ def _unknown(ctx: RescueContext, reason: object) -> ExitCode:
     return ExitCode.NOT_INCLUDED
 
 
-def _submit(ctx: RescueContext, bundle: PreparedBundle, block_count: int) -> int:
-    """Send the bundle for each target block; returns how many the relay accepted.
-    A failed send may still have reached the relay, so the caller watches anyway."""
+def _submit(ctx: RescueContext, bundle: PreparedBundle, block_count: int) -> None:
+    """Send the bundle for each target block. A failed send may still have
+    reached the relay, so the caller watches anyway."""
     ctx.reporter.submitting(bundle.target_block, bundle.target_block + block_count - 1)
-    accepted = 0
     for offset in range(block_count):
         target = bundle.target_block + offset
         try:
             ctx.w3.relay.send_bundle(bundle.entries, target_block_number=target)
-            accepted += 1
         except Exception as e:
             ctx.reporter.message(
                 "warning",
                 f"The relay did not confirm the bundle for block {target}: {e}",
             )
-    return accepted
 
 
 def _stale(ctx: RescueContext, bundle: PreparedBundle) -> bool:
@@ -406,6 +397,12 @@ def send_with_retry(
         if outcome is not None:
             return outcome
 
+    try:
+        inclusion = _await_lagging_inclusion(ctx, submitted)
+    except InclusionUnknown as e:
+        return _unknown(ctx, e)
+    if inclusion is not None:
+        return inclusion
     ctx.reporter.message(
         "error", f"Not included after {ctx.max_blocks} blocks. Nothing was rescued."
     )
@@ -414,19 +411,14 @@ def send_with_retry(
 
 def _report_predictions(
     ctx: RescueContext, bundle: PreparedBundle, indices: list[int]
-) -> list[int]:
-    failing = [
-        indices[position]
-        for position, result in enumerate(bundle.predicted)
-        if result is False
-    ]
-    for index in failing:
-        ctx.reporter.message(
-            "warning",
-            f"Action #{index + 1} reverts in a dry run of the rescue call, so it is "
-            "expected to fail.",
-        )
-    return failing
+) -> None:
+    for position, result in enumerate(bundle.predicted):
+        if result is False:
+            ctx.reporter.message(
+                "warning",
+                f"Action #{indices[position] + 1} reverts in a dry run of the rescue "
+                "call, so it is expected to fail.",
+            )
 
 
 def _fund_and_simulate(
@@ -482,7 +474,7 @@ def execution_results(
             results[indices[transaction.action_index]] = succeeded
         if transaction.role != "rescue-7702" or not succeeded:
             continue
-        start, size = transaction.batch_start or 0, transaction.batch_size
+        start, size = transaction.batch_start, transaction.batch_size
         for log in receipt["logs"]:
             topics = log["topics"]
             if (
@@ -634,13 +626,11 @@ def _preflight(
             f"The compromised wallet is delegated to {delegate}, likely by the "
             "attacker. The rescue replaces that delegation.",
         )
-    if legacy_fallback and (
-        legacy_bundle_transaction_count(len(rescue_data)) > MAX_BUNDLE_TRANSACTIONS
-    ):
+    if legacy_fallback and len(rescue_data) > MAX_LEGACY_ACTIONS:
         ctx.reporter.message(
             "warning",
             "The legacy fallback fits at most "
-            f"{MAX_BUNDLE_TRANSACTIONS - 3} actions in one bundle; if more fail, "
+            f"{MAX_LEGACY_ACTIONS} actions in one bundle; if more fail, "
             "it stops and you can rerun with a smaller plan.",
         )
     return True

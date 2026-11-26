@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from eth_utils import is_checksum_address, to_checksum_address
+from eth_utils import to_checksum_address
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -16,7 +16,12 @@ from pydantic import (
 
 from eth_rescue import templates
 from eth_rescue.bundle import MAX_ACTION_GAS
-from eth_rescue.calldata import CalldataError, build_calldata, parse_signature
+from eth_rescue.calldata import (
+    CalldataError,
+    build_calldata,
+    has_valid_checksum,
+    parse_signature,
+)
 from eth_rescue.types import RescueData
 
 MAX_UINT256 = 2**256 - 1
@@ -27,12 +32,9 @@ class PlanError(ValueError):
 
 
 def _checksum(value: str) -> str:
-    # eth_utils' is_address no longer rejects bad mixed-case checksums.
-    digits = value[2:]
-    is_mixed_case = digits != digits.lower() and digits != digits.upper()
-    if is_mixed_case and not is_checksum_address(value):
+    if not has_valid_checksum(value):
         raise ValueError("invalid address checksum")
-    if int(digits, 16) == 0:
+    if int(value, 16) == 0:
         raise ValueError("must not be the zero address")
     return to_checksum_address(value)
 
@@ -200,7 +202,7 @@ def _template_calls(action: Action, plan: Plan) -> list[RescueData]:
             ]
 
 
-def _expand_action(action: Action, plan: Plan, index: int = 0) -> list[RescueData]:
+def _expand_action(action: Action, plan: Plan, index: int) -> list[RescueData]:
     calls = _template_calls(action, plan)
     gas = getattr(action, "gas", None)
     for step, call in enumerate(calls):
@@ -225,12 +227,11 @@ def expand(plan: Plan) -> list[RescueData]:
 
 
 def _check_encodable(plan: Plan) -> None:
-    for index, action in enumerate(plan.actions):
-        for call in _expand_action(action, plan, index):
-            try:
-                build_calldata(call["function_signature"], call["args"])
-            except CalldataError as e:
-                raise PlanError(f"actions.{index}: {e}") from e
+    for call in expand(plan):
+        try:
+            build_calldata(call["function_signature"], call["args"])
+        except CalldataError as e:
+            raise PlanError(f"actions.{call['plan_action']}: {e}") from e
 
 
 def _format_validation_error(error: ValidationError) -> str:

@@ -60,6 +60,14 @@ def error(message: str) -> None:
     console.print(f"[red]ERROR[/red] {escape(plain(message))}")
 
 
+def ether(wei: int) -> str:
+    return f"{Web3.from_wei(wei, 'ether')} ETH"
+
+
+def _title(action: RescueData) -> str:
+    return action.get("description") or action["function_signature"]
+
+
 def describe_call(action: RescueData) -> str:
     return f"{action['function_signature']} {action['args']}"
 
@@ -72,10 +80,9 @@ def render_rescue_plan(actions: list[RescueData]) -> None:
     table.add_column("Call", overflow="fold")
 
     for i, action in enumerate(actions, 1):
-        desc = action.get("description") or action["function_signature"]
         table.add_row(
             str(i),
-            _literal(desc),
+            _literal(_title(action)),
             _literal(action["address"]),
             _literal(describe_call(action)),
         )
@@ -95,7 +102,7 @@ def render_bundle(bundle: PreparedBundle) -> None:
     info(
         f"Target block {bundle.target_block} @ max "
         f"{Web3.from_wei(bundle.max_fee_per_gas, 'gwei')} gwei; gas wallet needs "
-        f"{Web3.from_wei(bundle.required_funding, 'ether')} ETH"
+        f"{ether(bundle.required_funding)}"
     )
 
 
@@ -145,12 +152,10 @@ def render_outcome_report(
     table.add_column("Detail", overflow="fold")
 
     for outcome in outcomes:
-        action = actions[outcome.index]
-        desc = action.get("description") or action["function_signature"]
         label = STATUS_LABELS.get(outcome.status, outcome.status)
         table.add_row(
             str(outcome.index + 1),
-            _literal(desc),
+            _literal(_title(actions[outcome.index])),
             Text(label, style=STATUS_STYLES.get(outcome.status, "")),
             _literal(outcome.detail or ""),
         )

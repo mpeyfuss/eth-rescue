@@ -34,6 +34,10 @@ class Check:
     def balance_key(self) -> BalanceKey:
         return (self.kind, self.contract, self.recipient, self.token_id)
 
+    @property
+    def is_balance(self) -> bool:
+        return self.kind in ("erc20", "erc1155")
+
 
 class ReadUnavailable(RuntimeError):
     """A post-rescue read failed for reasons unrelated to the asset (RPC errors)."""
@@ -87,24 +91,36 @@ def _read(
     raise AssertionError("unreachable")
 
 
-def _balance(w3: Web3, check: Check, block: int | str, sleep) -> int:
-    if check.kind == "erc20":
-        contract = w3.eth.contract(address=check.contract, abi=ERC20_BALANCE_OF_ABI)
-        fn = contract.functions.balanceOf(check.recipient)
-    else:
-        contract = w3.eth.contract(address=check.contract, abi=ERC1155_BALANCE_OF_ABI)
-        fn = contract.functions.balanceOf(check.recipient, check.token_id)
+def _read_function(w3: Web3, check: Check):
+    match check.kind:
+        case "erc20":
+            contract = w3.eth.contract(address=check.contract, abi=ERC20_BALANCE_OF_ABI)
+            return contract.functions.balanceOf(check.recipient)
+        case "erc1155":
+            contract = w3.eth.contract(
+                address=check.contract, abi=ERC1155_BALANCE_OF_ABI
+            )
+            return contract.functions.balanceOf(check.recipient, check.token_id)
+        case "erc721":
+            contract = w3.eth.contract(address=check.contract, abi=ERC721_OWNER_OF_ABI)
+            return contract.functions.ownerOf(check.token_id)
+        case "ownership":
+            contract = w3.eth.contract(address=check.contract, abi=OWNABLE_OWNER_ABI)
+            return contract.functions.owner()
+    raise ReadUnavailable(f"unknown check kind {check.kind!r}")
+
+
+def _read_check(w3: Web3, check: Check, block: int | str, sleep) -> Any:
+    fn = _read_function(w3, check)
     return _read(lambda: fn.call(block_identifier=block), sleep)
 
 
+def _balance(w3: Web3, check: Check, block: int | str, sleep) -> int:
+    return _read_check(w3, check, block, sleep)
+
+
 def _owner(w3: Web3, check: Check, block: int, sleep) -> str:
-    if check.kind == "erc721":
-        contract = w3.eth.contract(address=check.contract, abi=ERC721_OWNER_OF_ABI)
-        fn = contract.functions.ownerOf(check.token_id)
-    else:
-        contract = w3.eth.contract(address=check.contract, abi=OWNABLE_OWNER_ABI)
-        fn = contract.functions.owner()
-    return to_checksum_address(_read(lambda: fn.call(block_identifier=block), sleep))
+    return to_checksum_address(_read_check(w3, check, block, sleep))
 
 
 def snapshot_checks(
@@ -116,7 +132,7 @@ def snapshot_checks(
     the balance could not be read (those actions end up unverified)."""
     snapshot: dict[BalanceKey, int | None] = {}
     for check in checks.values():
-        if check.kind not in ("erc20", "erc1155") or check.balance_key in snapshot:
+        if not check.is_balance or check.balance_key in snapshot:
             continue
         try:
             snapshot[check.balance_key] = _balance(w3, check, "latest", sleep)
@@ -194,7 +210,7 @@ def _evaluate_one(
         return ActionOutcome(
             index, "unverified", "the call succeeded; confirm its effect manually"
         )
-    if check.kind in ("erc20", "erc1155"):
+    if check.is_balance:
         return _evaluate_balance(index, check, balances)
     return _evaluate_owner(w3, index, check, block, sleep)
 

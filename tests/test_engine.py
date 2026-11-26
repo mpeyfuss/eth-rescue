@@ -1,4 +1,5 @@
 import itertools
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -134,7 +135,6 @@ def _make_bundle(chain, transactions, required=1000, predicted=(), target=None):
         required_funding=required,
         victim_funding=0,
         sweep_value=0,
-        expected_residual=0,
         predicted=tuple(predicted),
     )
 
@@ -336,6 +336,48 @@ def test_lagging_receipts_are_found_instead_of_resubmitting(reporter, chain, rel
     assert isinstance(result, Inclusion)
     assert result.block == 101
     assert len(relay.sent) == BUNDLE_BLOCK_RANGE
+
+
+def test_late_receipt_is_rechecked_before_building_the_next_bundle(
+    reporter, chain, monkeypatch
+):
+    relay = Relay(chain, land=lambda entries, block: block == 105)
+    lookup = chain.get_transaction_receipt
+    hidden_once = set()
+
+    def lagging_lookup(tx_hash):
+        receipt = lookup(tx_hash)
+        if bytes(tx_hash) not in hidden_once:
+            hidden_once.add(bytes(tx_hash))
+            raise TransactionNotFound("not indexed yet")
+        return receipt
+
+    monkeypatch.setattr(chain, "get_transaction_receipt", lagging_lookup)
+    stale_nonce = chain.gas_nonce
+    prepare = preparer_7702(chain)
+
+    def prepare_from_lagging_node(*args, **kwargs):
+        return replace(prepare(*args, **kwargs), gas_nonce=stale_nonce)
+
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(ctx, PREPARED, prepare_from_lagging_node)
+
+    assert isinstance(result, Inclusion)
+    assert result.block == 105
+    assert len(relay.sent) == BUNDLE_BLOCK_RANGE
+
+
+def test_late_receipt_after_the_last_window_is_found(reporter, chain):
+    relay = Relay(chain, land=lambda entries, block: block == 105)
+    chain.receipt_lag = 1
+    ctx = _ctx(reporter, chain, relay, max_blocks=BUNDLE_BLOCK_RANGE)
+
+    result = engine.send_with_retry(ctx, PREPARED, preparer_legacy(chain))
+
+    assert isinstance(result, Inclusion)
+    assert result.block == 105
+    assert not reporter.messages("error")
 
 
 def test_foreign_gas_nonce_change_stops_without_resubmitting(reporter, chain):

@@ -185,3 +185,14 @@ def test_reverted_typed_action_is_failed_without_reading_state():
 
     assert outcome.status == "failed"
     assert chain.blocks == []
+
+
+def test_unknown_check_kind_is_unverified_not_a_crash():
+    w3, _chain = _w3({})
+    check = checks.Check(kind="erc404", contract=TOKEN, recipient=SAFE)
+
+    [outcome] = checks.evaluate_checks(
+        w3, {0: check}, {}, {0: True}, BLOCK, sleep=_no_sleep
+    )
+
+    assert outcome.status == "unverified"

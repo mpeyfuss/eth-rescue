@@ -1,6 +1,7 @@
 import math
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 
@@ -75,6 +76,8 @@ SET_CODE_TX_TYPE = 0x04
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 # Flashbots eth_sendBundle: at most 100 transactions and 300,000 bytes.
 MAX_BUNDLE_TRANSACTIONS = 100
+# A worst-case fallback bundle adds undelegate, fund and sweep to the actions.
+MAX_LEGACY_ACTIONS = MAX_BUNDLE_TRANSACTIONS - 3
 MAX_BUNDLE_BYTES = 300_000
 # Most a base fee can rise per block under EIP-1559.
 BASE_FEE_STEP = Fraction(9, 8)
@@ -119,6 +122,40 @@ def _window_fee_cap(
     if latest_base_fee > 0:
         base += steps
     return min(max_fee_per_gas, base + priority_fee)
+
+
+@dataclass(frozen=True)
+class _ChainState:
+    chain_id: int
+    victim_nonce: int
+    gas_nonce: int
+    priority_fee: int
+    max_fee_per_gas: int
+    effective_fee_cap: int
+    target_block: int
+    timestamp: int
+
+
+def _chain_state(
+    w3: Web3, victim: LocalAccount, gas: LocalAccount, extra_priority_fee_gwei: Decimal
+) -> _ChainState:
+    latest = w3.eth.get_block("latest")
+    chain_id = w3.eth.chain_id
+    victim_nonce = w3.eth.get_transaction_count(victim.address)
+    gas_nonce = w3.eth.get_transaction_count(gas.address)
+    priority_fee, max_fee_per_gas = _compute_fees(w3, latest, extra_priority_fee_gwei)
+    return _ChainState(
+        chain_id=chain_id,
+        victim_nonce=victim_nonce,
+        gas_nonce=gas_nonce,
+        priority_fee=priority_fee,
+        max_fee_per_gas=max_fee_per_gas,
+        effective_fee_cap=_window_fee_cap(
+            int(latest["baseFeePerGas"]), priority_fee, max_fee_per_gas
+        ),
+        target_block=latest["number"] + TARGET_BLOCK_OFFSET,
+        timestamp=latest["timestamp"],
+    )
 
 
 def calldata_floor_gas(data: bytes, authorizations: int = 0) -> int:
@@ -213,14 +250,6 @@ def size_actions(
     return sized, failures
 
 
-def _is_empty_account(w3: Web3, address: str) -> bool:
-    return (
-        w3.eth.get_transaction_count(address) == 0
-        and w3.eth.get_balance(address) == 0
-        and not w3.eth.get_code(address)
-    )
-
-
 def _transfer_estimate(w3: Web3, safe: str) -> int | None:
     """Gas for a 1-wei transfer to `safe`, from a probe address the state
     override funds (so a dust or empty gas wallet cannot break the estimate)."""
@@ -239,7 +268,11 @@ def safe_receive_gas(w3: Web3, safe: str) -> int:
     for an empty account, the receive() of a contract or delegated safe (at
     least SWEEP_CALL_GAS, raised by a live estimate), or 0 for a plain EOA."""
     has_code = bool(w3.eth.get_code(safe))
-    empty = not has_code and _is_empty_account(w3, safe)
+    empty = (
+        not has_code
+        and w3.eth.get_transaction_count(safe) == 0
+        and w3.eth.get_balance(safe) == 0
+    )
     if not has_code and not empty:
         return 0
     estimate = _transfer_estimate(w3, safe)
@@ -302,11 +335,6 @@ def check_bundle_limits(transactions: list[BundleTransaction]) -> None:
         )
 
 
-def legacy_bundle_transaction_count(action_count: int) -> int:
-    """Transactions in a worst-case fallback bundle: undelegate, fund, actions, sweep."""
-    return action_count + 3
-
-
 def _required_funding_7702(rescue_gas_limits: list[int], max_fee_per_gas: int) -> int:
     """Total ETH the gas wallet must hold for the rescue calls."""
     total_gas = sum(rescue_gas_limits)
@@ -326,13 +354,11 @@ def _victim_funding_value(
 def _required_funding(
     gas_limits: list[int],
     max_fee_per_gas: int,
-    effective_fee_cap: int | None = None,
+    effective_fee_cap: int,
     needs_undelegation: bool = True,
     sweep_gas: int = SWEEP_TX_GAS,
 ) -> int:
     """Total ETH the gas wallet must hold for sponsor txs and victim funding."""
-    if effective_fee_cap is None:
-        effective_fee_cap = max_fee_per_gas
     victim_funding = _victim_funding_value(
         gas_limits, max_fee_per_gas, effective_fee_cap, sweep_gas
     )
@@ -341,6 +367,39 @@ def _required_funding(
         sponsor_gas += UNDELEGATE_TX_GAS
     sponsor_cost = sponsor_gas * max_fee_per_gas
     return int((victim_funding + sponsor_cost) * FUNDING_BUFFER)
+
+
+def _sign_sponsored_call(
+    *,
+    chain_id: int,
+    nonce: int,
+    to: str,
+    data: bytes,
+    gas: int,
+    priority_fee: int,
+    max_fee_per_gas: int,
+    sponsor_key: bytes,
+    authorization=None,
+) -> HexBytes:
+    """A zero-value call paid by the gas wallet; type 4 when it carries an
+    EIP-7702 authorization."""
+    transaction = {
+        "chainId": chain_id,
+        "nonce": nonce,
+        "maxPriorityFeePerGas": priority_fee,
+        "maxFeePerGas": max_fee_per_gas,
+        "gas": gas,
+        "to": to,
+        "value": 0,
+        "data": data,
+    }
+    if authorization is not None:
+        transaction |= {
+            "type": SET_CODE_TX_TYPE,
+            "accessList": [],
+            "authorizationList": [authorization],
+        }
+    return Account.sign_transaction(transaction, sponsor_key).raw_transaction
 
 
 def _sign_7702_undelegation(
@@ -362,23 +421,17 @@ def _sign_7702_undelegation(
         },
         authority_key,
     )
-    signed = Account.sign_transaction(
-        {
-            "type": SET_CODE_TX_TYPE,
-            "chainId": chain_id,
-            "nonce": tx_nonce,
-            "maxPriorityFeePerGas": priority_fee,
-            "maxFeePerGas": max_fee_per_gas,
-            "gas": UNDELEGATE_TX_GAS,
-            "to": sponsor_address,
-            "value": 0,
-            "data": b"",
-            "accessList": [],
-            "authorizationList": [authorization],
-        },
-        sponsor_key,
+    return _sign_sponsored_call(
+        chain_id=chain_id,
+        nonce=tx_nonce,
+        to=sponsor_address,
+        data=b"",
+        gas=UNDELEGATE_TX_GAS,
+        priority_fee=priority_fee,
+        max_fee_per_gas=max_fee_per_gas,
+        sponsor_key=sponsor_key,
+        authorization=authorization,
     )
-    return signed.raw_transaction
 
 
 def delegation_target(w3: Web3, address: str) -> str | None:
@@ -393,37 +446,6 @@ def delegation_target(w3: Web3, address: str) -> str | None:
 
 def has_7702_delegation(w3: Web3, address: str) -> bool:
     return delegation_target(w3, address) is not None
-
-
-def _sign_7702_rescue_tx(
-    *,
-    chain_id: int,
-    tx_nonce: int,
-    authorization,
-    victim_address: str,
-    sponsor_key: bytes,
-    calldata: bytes,
-    gas: int,
-    priority_fee: int,
-    max_fee_per_gas: int,
-) -> HexBytes:
-    signed = Account.sign_transaction(
-        {
-            "type": SET_CODE_TX_TYPE,
-            "chainId": chain_id,
-            "nonce": tx_nonce,
-            "maxPriorityFeePerGas": priority_fee,
-            "maxFeePerGas": max_fee_per_gas,
-            "gas": gas,
-            "to": victim_address,
-            "value": 0,
-            "data": calldata,
-            "accessList": [],
-            "authorizationList": [authorization],
-        },
-        sponsor_key,
-    )
-    return signed.raw_transaction
 
 
 def _rescue_calldata(
@@ -526,16 +548,9 @@ def prepare_7702_bundle(
     still succeeds, the bundle stays valid, and the full ETH balance is swept.
     Nothing signed here leaves the machine except in the bundle itself.
     """
-    latest = w3.eth.get_block("latest")
-    chain_id = w3.eth.chain_id
-    victim_nonce = w3.eth.get_transaction_count(victim.address)
-    gas_nonce = w3.eth.get_transaction_count(gas.address)
-    priority_fee, max_fee_per_gas = _compute_fees(w3, latest, extra_priority_fee_gwei)
-    effective_fee_cap = _window_fee_cap(
-        int(latest["baseFeePerGas"]), priority_fee, max_fee_per_gas
-    )
-    target_block = latest["number"] + TARGET_BLOCK_OFFSET
-    deadline = latest["timestamp"] + RESCUE_REQUEST_TTL
+    state = _chain_state(w3, victim, gas, extra_priority_fee_gwei)
+    chain_id = state.chain_id
+    deadline = state.timestamp + RESCUE_REQUEST_TTL
 
     base_gas = _rescue_base_gas(safe_receive_gas(w3, safe_address))
     batches = _rescue_batches(prepared, base_gas)
@@ -544,7 +559,7 @@ def prepare_7702_bundle(
     )
 
     authorization = Account.sign_authorization(
-        {"chainId": chain_id, "address": rescue_contract, "nonce": victim_nonce},
+        {"chainId": chain_id, "address": rescue_contract, "nonce": state.victim_nonce},
         victim.key,
     )
     calldatas = [
@@ -560,65 +575,43 @@ def prepare_7702_bundle(
         )
     ]
 
-    transactions = [
-        BundleTransaction(
-            "rescue-7702",
-            _sign_7702_rescue_tx(
-                chain_id=chain_id,
-                tx_nonce=gas_nonce,
-                authorization=authorization,
-                victim_address=victim.address,
-                sponsor_key=gas.key,
-                calldata=calldatas[0],
-                gas=gas_limits[0],
-                priority_fee=priority_fee,
-                max_fee_per_gas=max_fee_per_gas,
-            ),
-            batch_start=0,
-            batch_size=len(batches[0]),
-        )
-    ]
-    # The delegation set by the first rescue tx is live for the rest of the
-    # bundle, so continuation batches are plain sponsored calls to the victim.
-    batch_start = len(batches[0])
-    for offset in range(1, len(batches)):
-        signed = Account.sign_transaction(
-            {
-                "chainId": chain_id,
-                "nonce": gas_nonce + offset,
-                "maxPriorityFeePerGas": priority_fee,
-                "maxFeePerGas": max_fee_per_gas,
-                "gas": gas_limits[offset],
-                "to": victim.address,
-                "value": 0,
-                "data": calldatas[offset],
-            },
-            gas.key,
+    transactions: list[BundleTransaction] = []
+    batch_start = 0
+    for offset, (batch, calldata, limit) in enumerate(
+        zip(batches, calldatas, gas_limits)
+    ):
+        # The delegation set by the first rescue tx is live for the rest of the
+        # bundle, so continuation batches are plain sponsored calls to the victim.
+        signed = _sign_sponsored_call(
+            chain_id=chain_id,
+            nonce=state.gas_nonce + offset,
+            to=victim.address,
+            data=calldata,
+            gas=limit,
+            priority_fee=state.priority_fee,
+            max_fee_per_gas=state.max_fee_per_gas,
+            sponsor_key=gas.key,
+            authorization=authorization if offset == 0 else None,
         )
         transactions.append(
             BundleTransaction(
-                "rescue-7702",
-                signed.raw_transaction,
-                batch_start=batch_start,
-                batch_size=len(batches[offset]),
+                "rescue-7702", signed, batch_start=batch_start, batch_size=len(batch)
             )
         )
-        batch_start += len(batches[offset])
+        batch_start += len(batch)
     check_bundle_limits(transactions)
 
     return PreparedBundle(
         transactions=transactions,
-        victim_nonce=victim_nonce,
-        gas_nonce=gas_nonce,
-        priority_fee=priority_fee,
-        max_fee_per_gas=max_fee_per_gas,
-        effective_fee_cap=effective_fee_cap,
-        target_block=target_block,
-        required_funding=_required_funding_7702(gas_limits, max_fee_per_gas),
+        victim_nonce=state.victim_nonce,
+        gas_nonce=state.gas_nonce,
+        priority_fee=state.priority_fee,
+        max_fee_per_gas=state.max_fee_per_gas,
+        effective_fee_cap=state.effective_fee_cap,
+        target_block=state.target_block,
+        required_funding=_required_funding_7702(gas_limits, state.max_fee_per_gas),
         victim_funding=0,
         sweep_value=0,
-        expected_residual=0,
-        rescue_contract=rescue_contract,
         warnings=tuple(warnings),
         predicted=tuple(predicted),
     )
@@ -635,15 +628,10 @@ def prepare_bundle(
     """Build the legacy bundle (victim-signed transactions) for the next block:
     clear any delegation, fund the victim, send each action directly, and sweep
     what is left to the safe."""
-    latest = w3.eth.get_block("latest")
-    chain_id = w3.eth.chain_id
-    victim_nonce = w3.eth.get_transaction_count(victim.address)
-    gas_nonce = w3.eth.get_transaction_count(gas.address)
-    priority_fee, max_fee_per_gas = _compute_fees(w3, latest, extra_priority_fee_gwei)
-    effective_fee_cap = _window_fee_cap(
-        int(latest["baseFeePerGas"]), priority_fee, max_fee_per_gas
-    )
-    target_block = latest["number"] + TARGET_BLOCK_OFFSET
+    state = _chain_state(w3, victim, gas, extra_priority_fee_gwei)
+    chain_id = state.chain_id
+    max_fee_per_gas = state.max_fee_per_gas
+    effective_fee_cap = state.effective_fee_cap
     victim_balance = w3.eth.get_balance(victim.address)
     needs_undelegation = has_7702_delegation(w3, victim.address)
     sweep_gas = SWEEP_TX_GAS + safe_receive_gas(w3, safe_address)
@@ -658,21 +646,25 @@ def prepare_bundle(
         gas_limits, max_fee_per_gas, effective_fee_cap, sweep_gas
     )
 
-    fees = {"maxFeePerGas": max_fee_per_gas, "maxPriorityFeePerGas": priority_fee}
+    fees = {
+        "maxFeePerGas": max_fee_per_gas,
+        "maxPriorityFeePerGas": state.priority_fee,
+    }
     transactions: list[BundleTransaction] = []
     nonce_offset = int(needs_undelegation)
+    victim_nonce = state.victim_nonce + nonce_offset
     if needs_undelegation:
         transactions.append(
             BundleTransaction(
                 "undelegate",
                 _sign_7702_undelegation(
                     chain_id=chain_id,
-                    tx_nonce=gas_nonce,
-                    authority_nonce=victim_nonce,
+                    tx_nonce=state.gas_nonce,
+                    authority_nonce=state.victim_nonce,
                     authority_key=victim.key,
                     sponsor_key=gas.key,
                     sponsor_address=gas.address,
-                    priority_fee=priority_fee,
+                    priority_fee=state.priority_fee,
                     max_fee_per_gas=max_fee_per_gas,
                 ),
             )
@@ -681,7 +673,7 @@ def prepare_bundle(
         "to": victim.address,
         "value": victim_funding,
         "gas": FUNDING_TX_GAS,
-        "nonce": gas_nonce + nonce_offset,
+        "nonce": state.gas_nonce + nonce_offset,
         "chainId": chain_id,
     } | fees
     transactions.append(
@@ -694,7 +686,7 @@ def prepare_bundle(
             "to": action["to"],
             "data": action["data"],
             "gas": limit,
-            "nonce": victim_nonce + nonce_offset + index,
+            "nonce": victim_nonce + index,
             "chainId": chain_id,
         } | fees
         transactions.append(
@@ -710,8 +702,8 @@ def prepare_bundle(
             "value": sweep_value,
             "gas": sweep_gas,
             "maxFeePerGas": effective_fee_cap,
-            "maxPriorityFeePerGas": min(priority_fee, effective_fee_cap),
-            "nonce": victim_nonce + nonce_offset + len(prepared),
+            "maxPriorityFeePerGas": min(state.priority_fee, effective_fee_cap),
+            "nonce": victim_nonce + len(prepared),
             "chainId": chain_id,
         }
         transactions.append(
@@ -723,12 +715,12 @@ def prepare_bundle(
 
     return PreparedBundle(
         transactions=transactions,
-        victim_nonce=victim_nonce,
-        gas_nonce=gas_nonce,
-        priority_fee=priority_fee,
+        victim_nonce=state.victim_nonce,
+        gas_nonce=state.gas_nonce,
+        priority_fee=state.priority_fee,
         max_fee_per_gas=max_fee_per_gas,
         effective_fee_cap=effective_fee_cap,
-        target_block=target_block,
+        target_block=state.target_block,
         required_funding=_required_funding(
             gas_limits,
             max_fee_per_gas,
@@ -738,5 +730,4 @@ def prepare_bundle(
         ),
         victim_funding=victim_funding,
         sweep_value=sweep_value,
-        expected_residual=0,
     )

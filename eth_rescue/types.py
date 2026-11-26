@@ -86,7 +86,7 @@ class BundleTransaction:
     signed_transaction: HexBytes
     action_index: int | None = None
     # the calls a rescue-7702 transaction covers: batch_start .. batch_start + batch_size - 1
-    batch_start: int | None = None
+    batch_start: int = 0
     batch_size: int = 0
 
     @property
@@ -106,8 +106,6 @@ class PreparedBundle:
     required_funding: int
     victim_funding: int
     sweep_value: int
-    expected_residual: int
-    rescue_contract: str | None = None
     warnings: tuple[str, ...] = ()
     # Dry-run call result per action (unsigned eth_call), None where unavailable.
     predicted: tuple[bool | None, ...] = ()
@@ -139,7 +137,6 @@ class ActionOutcome:
 @dataclass(frozen=True)
 class SimulationFailure:
     message: str
-    transaction_index: int | None = None
     role: TransactionRole | None = None
     action_index: int | None = None
 
@@ -148,7 +145,6 @@ class SimulationFailure:
 class SimulationOutcome:
     ok: bool
     bundle: PreparedBundle | None = None
-    result: SimulationResult | None = None
     failures: tuple[SimulationFailure, ...] = ()
 
     def __bool__(self) -> bool:

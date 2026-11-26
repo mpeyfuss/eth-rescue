@@ -150,13 +150,12 @@ class RelayClient:
     def simulate(
         self, bundle: list[BundleEntry], block_tag: int | str | None = None
     ) -> SimulationResult:
+        latest_block = self.w3.eth.block_number
         block_number = (
-            self.w3.eth.block_number
+            latest_block
             if block_tag is None or block_tag == "latest"
             else int(block_tag)
         )
-
-        latest_block = self.w3.eth.block_number
 
         if block_number < latest_block:
             raise ValueError("Simulation target block cannot be in the past")

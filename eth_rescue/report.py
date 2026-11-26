@@ -3,7 +3,6 @@ import sys
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Literal, Protocol, TextIO
 
-from web3 import Web3
 from web3.types import TxReceipt
 
 from eth_rescue import ui
@@ -26,10 +25,6 @@ class Reporter(Protocol):
     ) -> None: ...
     def final_state(self, victim_balance: int, delegation: str | None) -> None: ...
     def waiting(self, text: str) -> AbstractContextManager[Any]: ...
-
-
-def _ether(wei: int) -> str:
-    return f"{Web3.from_wei(wei, 'ether')} ETH"
 
 
 def _json_safe(value: Any) -> Any:
@@ -58,11 +53,11 @@ class RichReporter:
 
     def funding(self, address: str, required: int, balance: int) -> None:
         if balance >= required:
-            ui.success(f"Gas wallet funded ({_ether(balance)}).")
+            ui.success(f"Gas wallet funded ({ui.ether(balance)}).")
             return
         ui.warning(
-            f"Send at least {_ether(required - balance)} to {address} "
-            f"(balance {_ether(balance)} / needs {_ether(required)}). "
+            f"Send at least {ui.ether(required - balance)} to {address} "
+            f"(balance {ui.ether(balance)} / needs {ui.ether(required)}). "
             "Re-checking every block."
         )
 

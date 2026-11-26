@@ -28,6 +28,9 @@ eth-rescue = "eth_rescue.cli:run"
 requires = ["uv_build>=0.11.0,<0.12.0"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+module-root = ""
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",

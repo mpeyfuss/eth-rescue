@@ -1,7 +1,7 @@
 import { type AbiFunction, type AbiParameter, encodeFunctionData, type Hex, parseAbiItem, toFunctionSignature } from "viem";
 import { addressProblem, toChecksum } from "./address";
 
-// Mirrors src/eth_rescue/calldata.py. Both sides are tested against
+// Mirrors eth_rescue/calldata.py. Both sides are tested against
 // tests/fixtures/abi_vectors.json, so a plan the builder accepts encodes to the
 // same bytes in the CLI.
 

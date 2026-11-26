@@ -126,13 +126,13 @@ uv run eth-rescue --help
 
 Contract tests: `cd contracts && forge test`.
 
-`src/eth_rescue/`: `plan.py` (models, expansion), `calldata.py` (ABI rules), `bundle.py` (building and signing), `engine.py` (fund → simulate → send → verify → fallback), `checks.py` (postconditions), `relay.py` (Flashbots), `cli.py`, `report.py`/`ui.py` (output).
+`eth_rescue/`: `plan.py` (models, expansion), `calldata.py` (ABI rules), `bundle.py` (building and signing), `engine.py` (fund → simulate → send → verify → fallback), `checks.py` (postconditions), `relay.py` (Flashbots), `cli.py`, `report.py`/`ui.py` (output).
 
 The ABI rules are shared with the web builder through `tests/fixtures/abi_vectors.json`: `tests/test_calldata.py` and `web/test/custom.test.ts` must agree on every vector, so a plan the builder accepts encodes to the same bytes in the CLI.
 
 ### Gas and forks
 
-EthRescue never checks gas itself, so the CLI's budget is all that stands between a rescue and starved actions. The constants and their reasoning live in `src/eth_rescue/bundle.py`. The rules:
+EthRescue never checks gas itself, so the CLI's budget is all that stands between a rescue and starved actions. The constants and their reasoning live in `eth_rescue/bundle.py`. The rules:
 
 - **Measure, don't hardcode.** Each action's gas limit is a live `eth_estimateGas` × `--gas-multiplier`, with the template's gas as a floor that an estimate can only raise. The cost of sweeping to an empty safe comes from a live transfer estimate.
 - **Size once, before any delegation changes.** Phase-1 estimates also describe the undelegated wallet that the legacy fallback runs as.

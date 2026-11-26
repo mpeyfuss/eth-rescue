@@ -4,6 +4,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from web3.exceptions import ContractLogicError
 from eth_abi import decode, encode as abi_encode
 from eth_account.account import Account
 from eth_account.typed_transactions import TypedTransaction
@@ -292,6 +293,39 @@ def test_size_actions_retries_without_override_when_rpc_refuses_it():
 
     assert sized[0]["gas"] == 135_000
     assert failures == {}
+
+
+def test_size_actions_never_estimates_through_an_existing_delegation():
+    chain = FakeChain()
+    chain.code["victim"] = b"\xef\x01\x00" + b"\x99" * 20
+    chain.estimate_result = lambda tx, override: (
+        ValueError("override unsupported") if override else 7_000_000
+    )
+
+    sized, failures = bundle.size_actions(
+        _w3(chain), "victim", [{"to": "t", "data": "0x", "gas": 75_000}]
+    )
+
+    assert sized[0]["gas"] == 75_000
+    assert failures == {0: "override unsupported"}
+    assert [override for _kind, _tx, override in chain.requests] == [
+        {"victim": {"code": "0x"}}
+    ]
+
+
+def test_size_actions_does_not_rerun_a_revert_without_the_override():
+    chain = FakeChain()
+    chain.estimate_result = lambda tx, override: (
+        ContractLogicError("execution reverted") if override else 7_000_000
+    )
+
+    sized, failures = bundle.size_actions(
+        _w3(chain), "victim", [{"to": "t", "data": "0x", "gas": 75_000}]
+    )
+
+    assert sized[0]["gas"] == 75_000
+    assert 0 in failures
+    assert len(chain.requests) == 1
 
 
 def test_size_actions_keeps_floor_and_reports_failed_estimates():
@@ -714,7 +748,8 @@ def test_prepare_bundle_warns_how_much_unused_gas_can_be_left_behind(chain, acco
     prepared = _prepare_legacy(chain, accounts, [_action(gas=50_000)])
 
     [warning] = prepared.warnings
-    expected = Web3.from_wei(50_000 * prepared.effective_fee_cap, "ether")
+    reserve = (50_000 + bundle.SWEEP_TX_GAS) * prepared.effective_fee_cap
+    expected = Web3.from_wei(reserve, "ether")
     assert f"up to {expected} ETH" in warning
 
 

@@ -56,6 +56,11 @@ test("non-integer numbers stay text so validation reports them", () => {
   expect((toPlan(draft).options as Record<string, unknown>).max_blocks).toBe("2.5");
 });
 
+test("integers past 2^53 stay text instead of rounding", () => {
+  const draft = { ...emptyDraft(), max_blocks: "9007199254740993" };
+  expect((toPlan(draft).options as Record<string, unknown>).max_blocks).toBe("9007199254740993");
+});
+
 test("fromPlan rejects non-plans", () => {
   expect(() => fromPlan([])).toThrow(PlanImportError);
   expect(() => fromPlan({ version: 2 })).toThrow("only version 1");

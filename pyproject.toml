@@ -10,6 +10,7 @@ dependencies = [
     "pydantic>=2.13.4",
     "requests>=2.32",
     "rich>=14.0.0",
+    "urllib3>=2",
     "web3>=7.16,<8",
 ]
 

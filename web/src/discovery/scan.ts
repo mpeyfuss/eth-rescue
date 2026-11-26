@@ -23,11 +23,17 @@ async function scanTokens({ network, victim, alchemyKey }: ScanRequest, warn: Wa
   if (!alchemyKey) return [];
   const balances = await fetchTokenBalances(network, alchemyKey, victim, warn);
   const held = heldBalances(balances);
-  const metadata = await fetchTokenMetadata(
-    network,
-    alchemyKey,
-    held.map((balance) => balance.contractAddress),
-  );
+  let metadata: Awaited<ReturnType<typeof fetchTokenMetadata>> = new Map();
+  try {
+    metadata = await fetchTokenMetadata(
+      network,
+      alchemyKey,
+      held.map((balance) => balance.contractAddress),
+    );
+  } catch (error) {
+    // The balances are already known; show them in base units, unnamed.
+    if (held.length > 0) warn(`could not read token names and decimals: ${message(error)}`);
+  }
   return tokenCandidates(held, metadata);
 }
 

@@ -169,7 +169,12 @@ def test_read_retries_transient_errors():
 
 @pytest.mark.parametrize(
     ("executed", "status"),
-    [(None, "not_executed"), (False, "failed"), (True, "unverified")],
+    [
+        (None, "not_executed"),
+        (False, "failed"),
+        (True, "unverified"),
+        ("unknown", "unverified"),
+    ],
 )
 def test_call_result_decides_status_before_any_check(executed, status):
     data = templates.custom(TOKEN, "delist(address,uint256)", [OTHER, 1])
@@ -179,6 +184,17 @@ def test_call_result_decides_status_before_any_check(executed, status):
 
     assert outcome.status == status
     assert chain.blocks == []
+
+
+@pytest.mark.parametrize(("owner", "status"), [(SAFE, "rescued"), (OTHER, "failed")])
+def test_unknown_call_result_is_judged_by_the_check(owner, status):
+    data = templates.erc721_transfer(TOKEN, OTHER, SAFE, 9)
+    w3, chain = _w3({"ownerOf": owner})
+
+    [outcome] = _evaluate(w3, [data], {}, {0: "unknown"})
+
+    assert outcome.status == status
+    assert chain.blocks == [BLOCK]
 
 
 def test_reverted_typed_action_is_failed_without_reading_state():

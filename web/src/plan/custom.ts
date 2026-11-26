@@ -22,8 +22,16 @@ function components(param: AbiParameter): readonly AbiParameter[] {
   return "components" in param ? param.components : [];
 }
 
+// eth_abi rejects zero-length and zero-padded sizes such as [0] and [07].
+const ARRAY_SUFFIXES_RE = /(\[\d*\])+$/;
+const ARRAY_SIZE_RE = /^([1-9][0-9]*)?$/;
+
 function checkSupported(param: AbiParameter): void {
-  const type = param.type.replace(/(\[\d*\])+$/, "");
+  const suffixes = ARRAY_SUFFIXES_RE.exec(param.type)?.[0] ?? "";
+  for (const [, size] of suffixes.matchAll(/\[(\d*)\]/g)) {
+    if (!ARRAY_SIZE_RE.test(size ?? "")) fail(`unsupported array size in ${param.type}`);
+  }
+  const type = param.type.slice(0, param.type.length - suffixes.length);
   if (type === "tuple") return components(param).forEach(checkSupported);
   if (type === "address" || type === "bool" || type === "string") return;
   const int = INT_RE.exec(type);
@@ -127,6 +135,16 @@ export function encodeCustomCall(signature: string, args: unknown[]): Hex {
     return encodeFunctionData({ abi: [fn], functionName: fn.name, args: coerced });
   } catch (error) {
     fail(`args do not encode: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
+  }
+}
+
+export function signatureProblem(signature: string): string | null {
+  try {
+    parseSignature(signature);
+    return null;
+  } catch (error) {
+    if (error instanceof CustomCallError) return error.message;
+    throw error;
   }
 }
 

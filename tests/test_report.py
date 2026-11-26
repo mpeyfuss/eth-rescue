@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from eth_rescue import templates, ui
 from eth_rescue.report import JsonReporter
 from eth_rescue.types import ActionOutcome
@@ -102,6 +104,21 @@ def test_plain_redacts_bare_url_paths_from_connection_errors():
 
     assert "SECRET" not in ui.plain(text)
     assert "with url: /… (Caused by timeout)" in ui.plain(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        ("(see https://rpc.example/v2/a)SECRET)", "(see https://rpc.example/…)"),
+        ("(see https://rpc.example/v2/SECRET)", "(see https://rpc.example/…)"),
+        ("(see https://rpc.example)", "(see https://rpc.example)"),
+        ("https://rpc.example/x(1)/SECRET", "https://rpc.example/…"),
+        ("with url: /v3/a)SECRET (Caused by", "with url: /… (Caused by"),
+        ("(with url: /v3/SECRET)", "(with url: /…)"),
+    ],
+)
+def test_plain_redacts_urls_past_a_closing_parenthesis(text, shown):
+    assert ui.plain(text) == shown
 
 
 def test_json_reporter_redacts_urls():

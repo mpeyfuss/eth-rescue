@@ -129,10 +129,16 @@ class RelayClient:
         except ValueError as e:
             raise RelayError("Relay response was not JSON") from e
 
-        if "error" in payload:
-            error = payload["error"]
+        if not isinstance(payload, dict):
+            raise RelayError("Relay response was not a JSON-RPC object")
+        # Some proxies send "error": null beside a result, or a bare string.
+        if (error := payload.get("error")) is not None:
+            if not isinstance(error, dict):
+                raise RelayRPCError(None, str(error)[:MAX_ERROR_LENGTH])
+            code = error.get("code")
             raise RelayRPCError(
-                error.get("code"), str(error.get("message", ""))[:MAX_ERROR_LENGTH]
+                code if isinstance(code, int) else None,
+                str(error.get("message", ""))[:MAX_ERROR_LENGTH],
             )
 
         if "result" not in payload:

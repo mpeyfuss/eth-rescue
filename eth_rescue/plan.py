@@ -16,6 +16,7 @@ from pydantic import (
 
 from eth_rescue import templates
 from eth_rescue.templates import MAX_ACTION_GAS
+from eth_rescue.networks import NETWORKS
 from eth_rescue.calldata import (
     CalldataError,
     build_calldata,
@@ -72,7 +73,9 @@ NetworkName = Literal["mainnet"]
 
 
 class _Model(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # Strict, so the CLI accepts exactly what the JSON schema (and so the web
+    # builder) does: no "false" for false, no "21000" for 21000.
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
 class _Action(_Model):
@@ -156,6 +159,10 @@ class Plan(_Model):
     def _distinct_wallets(self) -> "Plan":
         if self.safe == self.victim:
             raise ValueError("safe must differ from victim")
+        if self.safe.lower() == (NETWORKS[self.network]["eth_rescue"] or "").lower():
+            raise ValueError(
+                "safe must not be the EthRescue contract: ETH sent there is lost"
+            )
         if self.gas_wallet in (self.victim, self.safe):
             raise ValueError("gas_wallet must differ from victim and safe")
         for index, action in enumerate(self.actions):

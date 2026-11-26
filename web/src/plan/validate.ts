@@ -1,8 +1,8 @@
 import Ajv2020, { type ErrorObject, type ValidateFunction } from "ajv/dist/2020";
 import schema from "../../../schema/plan.v1.schema.json";
 import { addressProblem, sameAddress } from "./address";
-import { customArgsProblem } from "./custom";
-import { isAvailableNetwork } from "./draft";
+import { customArgsProblem, signatureProblem } from "./custom";
+import { isAvailableNetwork, NETWORKS } from "./draft";
 import type { Plan } from "./types.gen";
 
 export interface Issue {
@@ -108,9 +108,13 @@ function fieldIssues(action: Record<string, unknown>, prefix: string, victim: un
     const value = action[field];
     if (typeof value === "string" && /^\d+$/.test(value) && BigInt(value) > MAX_UINT256) add(field, "exceeds uint256");
   }
-  if (action.type === "custom" && typeof action.signature === "string" && Array.isArray(action.args)) {
-    const problem = customArgsProblem(action.signature, action.args);
-    if (problem) add("args", problem);
+  if (action.type === "custom" && typeof action.signature === "string") {
+    const problem = signatureProblem(action.signature);
+    if (problem) add("signature", problem);
+    else if (Array.isArray(action.args)) {
+      const argsProblem = customArgsProblem(action.signature, action.args);
+      if (argsProblem) add("args", argsProblem);
+    }
   }
   return issues;
 }
@@ -134,6 +138,10 @@ function walletIssues(plan: Record<string, unknown>, flagged: Issue[]): Issue[] 
   if (issues.length > 0 || flagged.some((issue) => PLAN_ADDRESS_FIELDS.includes(issue.path))) return issues;
   const { victim, safe, gas_wallet } = plan as Pick<Plan, "victim" | "safe" | "gas_wallet">;
   if (sameAddress(safe, victim)) issues.push({ path: "safe", message: "must differ from the compromised wallet" });
+  const ethRescue = NETWORKS.find((network) => network.value === plan.network)?.ethRescue;
+  if (ethRescue && sameAddress(safe, ethRescue)) {
+    issues.push({ path: "safe", message: "must not be the EthRescue contract: ETH sent there is lost" });
+  }
   if (gas_wallet && (sameAddress(gas_wallet, victim) || sameAddress(gas_wallet, safe))) {
     issues.push({ path: "gas_wallet", message: "must differ from the compromised wallet and safe wallet" });
   }

@@ -242,6 +242,28 @@ def test_request_raises_typed_rpc_error(monkeypatch):
     assert error.value.code == -32000
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"jsonrpc": "2.0", "id": 1, "error": None, "result": "ok"}, "ok"),
+        ({"jsonrpc": "2.0", "id": 1, "error": "rate limited"}, RelayRPCError),
+        (["not", "an", "object"], RelayError),
+    ],
+    ids=["null-error", "string-error", "array"],
+)
+def test_request_tolerates_odd_json_rpc_shapes(monkeypatch, payload, expected):
+    client = _client()
+    monkeypatch.setattr(
+        "eth_rescue.relay.requests.post", lambda *args, **kwargs: Response(payload)
+    )
+
+    if isinstance(expected, type):
+        with pytest.raises(expected):
+            client._request("eth_test", [{}])
+    else:
+        assert client._request("eth_test", [{}]) == expected
+
+
 def test_request_rejects_response_without_result(monkeypatch):
     client = _client()
     monkeypatch.setattr(

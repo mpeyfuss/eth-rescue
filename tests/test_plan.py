@@ -124,6 +124,25 @@ def test_max_uint256_amount_accepted():
 
 
 @pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"options": {"legacy_fallback": "false"}}, id="bool-as-string"),
+        pytest.param({"options": {"legacy_fallback": 0}}, id="bool-as-number"),
+        pytest.param({"options": {"max_blocks": "25"}}, id="int-as-string"),
+        pytest.param({"options": {"max_blocks": True}}, id="int-as-bool"),
+    ],
+)
+def test_options_are_not_coerced(overrides):
+    with pytest.raises(PlanError, match="options"):
+        parse_plan(_plan([ERC721], **overrides))
+
+
+def test_action_gas_is_not_coerced():
+    with pytest.raises(PlanError, match="gas"):
+        parse_plan(_plan([ERC721 | {"gas": "21000"}]))
+
+
+@pytest.mark.parametrize(
     ("text", "message"),
     [
         ("{not json", "Invalid JSON"),
@@ -136,6 +155,10 @@ def test_max_uint256_amount_accepted():
             "checksum",
         ),
         (_plan([ERC721], safe=VICTIM), "safe must differ"),
+        (
+            _plan([ERC721], safe=NETWORKS["mainnet"]["eth_rescue"].lower()),
+            "EthRescue contract",
+        ),
         (_plan([ERC721], gas_wallet=SAFE), "gas_wallet must differ"),
         (_plan([ERC721 | {"token_id": 78}]), "token_id"),
         (_plan([ERC721 | {"token_id": "-1"}]), "token_id"),
@@ -214,6 +237,7 @@ def test_max_uint256_amount_accepted():
         "unknown-field",
         "bad-checksum",
         "safe-is-victim",
+        "safe-is-ethrescue",
         "gas-is-safe",
         "numeric-token-id",
         "negative-token-id",
@@ -321,3 +345,11 @@ def test_validation_messages_drop_pydantic_prefix():
         parse_plan(_plan([ERC721], safe=VICTIM))
 
     assert str(error.value) == "safe must differ from victim"
+
+
+def test_web_builder_knows_each_network_ethrescue_deployment():
+    draft = (ROOT / "web" / "src" / "plan" / "draft.ts").read_text()
+
+    for name, network in NETWORKS.items():
+        assert f'value: "{name}"' in draft
+        assert f'ethRescue: "{network["eth_rescue"]}"' in draft

@@ -1,7 +1,7 @@
 from eth_account.signers.local import LocalAccount
-from web3 import HTTPProvider
 
 from eth_rescue.relay import BUILDERS, RelayClient, RelayWeb3
+from eth_rescue.rpc import BackoffHTTPProvider
 from eth_rescue.types import Network
 
 # `eth_rescue` is the EthRescue deployment victims delegate to and
@@ -24,7 +24,7 @@ NETWORKS: dict[str, Network] = {
 
 
 def connect(network: Network, auth: LocalAccount, rpc: str | None = None) -> RelayWeb3:
-    w3 = RelayWeb3(HTTPProvider(rpc or network["rpc"]))
+    w3 = RelayWeb3(BackoffHTTPProvider(rpc or network["rpc"]))
     if not w3.is_connected():
         raise ConnectionError(f"Could not connect to {network['label']} RPC")
     if w3.eth.chain_id != network["chain_id"]:

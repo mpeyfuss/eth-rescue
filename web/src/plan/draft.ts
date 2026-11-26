@@ -6,7 +6,10 @@ export type Network = Plan["network"];
 export type PlanAction = Plan["actions"][number];
 export type ActionType = PlanAction["type"];
 
-export const NETWORKS: { value: Network; label: string }[] = [{ value: "mainnet", label: "Ethereum mainnet" }];
+// `ethRescue` mirrors eth_rescue/networks.py (tests/test_plan.py checks it).
+export const NETWORKS: { value: Network; label: string; ethRescue: string }[] = [
+  { value: "mainnet", label: "Ethereum mainnet", ethRescue: "0xe9Da4345F6AB43e05FF3DE7999A99Dc30710421A" },
+];
 
 export function isAvailableNetwork(value: unknown): value is Network {
   return NETWORKS.some((network) => network.value === value);
@@ -109,9 +112,10 @@ export function newAction(type: ActionType): DraftAction {
   };
 }
 
-// Numbers stay strings when they are not plain integers so the schema reports them.
+// Numbers stay strings when they are not exact plain integers (past 2^53 a JS
+// number rounds), so the schema reports them instead of exporting another value.
 function integerOrText(text: string): number | string {
-  return /^\d+$/.test(text) ? Number(text) : text;
+  return /^\d+$/.test(text) && Number.isSafeInteger(Number(text)) ? Number(text) : text;
 }
 
 export function actionToPlan(action: DraftAction): Record<string, unknown> {

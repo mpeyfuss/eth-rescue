@@ -392,5 +392,11 @@
       ]
     ],
     "error": "tuple shape"
-  }
+  },
+  {"signature": "f(uint256)", "args": [1e3], "calldata": "0xb3de648b00000000000000000000000000000000000000000000000000000000000003e8"},
+  {"signature": "f(uint256)", "args": [1000.0], "calldata": "0xb3de648b00000000000000000000000000000000000000000000000000000000000003e8"},
+  {"signature": "f(uint256)", "args": [1e30], "error": "float beyond 2^53"},
+  {"signature": "f(uint256[0])", "args": [[]], "error": "zero-size array"},
+  {"signature": "f(uint256[02])", "args": [["1", "2"]], "error": "zero-padded array size"},
+  {"signature": "f(uint256[2][0])", "args": [[]], "error": "zero-size outer array"}
 ]

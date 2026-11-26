@@ -11,6 +11,7 @@ from eth_rescue.bundle import (
     _batch_tx_gas,
     _rescue_base_gas,
     prepare_actions,
+    prepare_bundle,
     safe_receive_gas,
 )
 from eth_rescue.engine import ExitCode
@@ -66,6 +67,10 @@ def test_run_rescues_asset_matrix_and_sweeps_all_eth(
     assert asset_contracts["erc1155"].functions.balanceOf(safe.address, 7).call() == 25
     assert asset_contracts["ownable"].functions.owner().call() == safe.address
     assert _statuses(reporter) == ["rescued"] * 4
+    assert not any(
+        "Could not replay" in m or "authorization was skipped" in m
+        for m in reporter.messages("warning")
+    )
     [(bundle,)] = reporter.named("bundle")
     assert [t.role for t in bundle.transactions] == ["rescue-7702"]
     assert bundle.warnings == ()  # the type-4 whole-transaction estimate worked
@@ -289,6 +294,7 @@ def test_nonce_race_leaves_calls_unexecuted_and_fallback_rescues_them(
     assert result == ExitCode.OK
     phase_1, _phase_2, final = (outcomes for _a, outcomes in reporter.named("outcomes"))
     assert [o.status for o in phase_1] == ["not_executed", "not_executed"]
+    assert any("authorization was skipped" in m for m in reporter.messages("warning"))
     assert [o.status for o in final] == ["unverified", "rescued"]
     assert erc721.functions.ownerOf(1).call() == safe.address
     assert relay.front_run is None
@@ -378,11 +384,11 @@ def test_contract_safe_receives_the_sweep_in_both_phases(
     assert receiver.functions.received().call() > anvil_w3.to_wei(0.99, "ether")
 
 
-def test_reverted_transaction_still_counts_as_inclusion(
+def test_call_that_starts_failing_after_simulation_is_reported_failed(
     anvil_w3, rescue_accounts, switch, relay, make_ctx, reporter
 ):
+    """rescue() catches the failing call, so the transaction still succeeds."""
     victim, gas, safe = rescue_accounts
-    relay.allow_reverts = True
     funder = anvil_w3.eth.accounts[0]
     relay.front_run = lambda: anvil_w3.eth.wait_for_transaction_receipt(
         switch.functions.toggle().transact({"from": funder})
@@ -399,6 +405,30 @@ def test_reverted_transaction_still_counts_as_inclusion(
     assert _statuses(reporter) == ["failed"]
     assert len(relay.sent) == BUNDLE_BLOCK_RANGE
     assert len(relay.landed) == 1
+
+
+def test_reverted_legacy_transaction_still_counts_as_inclusion(
+    anvil_w3, rescue_accounts, switch, relay, make_ctx
+):
+    victim, gas, safe = rescue_accounts
+    relay.allow_reverts = True
+    funder = anvil_w3.eth.accounts[0]
+    relay.front_run = lambda: anvil_w3.eth.wait_for_transaction_receipt(
+        switch.functions.toggle().transact({"from": funder})
+    )
+    ctx = make_ctx(victim, gas, safe)
+    prepared = engine.sized_actions(
+        ctx, [templates.custom(switch.address, "poke()", [], 50_000)]
+    )
+
+    inclusion = engine.send_with_retry(ctx, prepared, prepare_bundle)
+
+    assert isinstance(inclusion, engine.Inclusion)
+    roles = [transaction.role for transaction in inclusion.bundle.transactions]
+    statuses = [receipt["status"] for receipt in inclusion.receipts]
+    assert statuses[roles.index("rescue")] == 0
+    assert statuses[roles.index("sweep")] == 1
+    assert engine.execution_results(inclusion, victim.address, [0]) == {0: False}
 
 
 def test_run_declined_sends_nothing(rescue_accounts, asset_contracts, relay, make_ctx):
@@ -527,7 +557,8 @@ def test_delist_of_an_unlisted_nft_does_not_fail_the_rescue(
     result = engine.run(make_ctx(victim, gas, safe), calls, confirm=_confirm)
 
     assert result == ExitCode.OK
-    assert _statuses(reporter) == ["failed", "rescued"]
+    assert _statuses(reporter) == ["rescued", "rescued"]
+    assert reporter.messages("success")[-1] == "Rescue complete."
     assert erc721.functions.ownerOf(1).call() == safe.address
     assert len(reporter.named("phase")) == 1
 

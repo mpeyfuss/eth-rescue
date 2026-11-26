@@ -24,18 +24,31 @@ err_console = Console(stderr=True)
 LONG_HEX_RE = re.compile(r"0x[0-9a-fA-F]{130,}")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 # RPC URLs often carry an API key in the path, query or userinfo, and HTTP
-# client errors repeat them; only the scheme and host are kept.
+# client errors repeat them; only the scheme and host are kept. Everything up to
+# whitespace or a quote is treated as part of the URL, since ")" is legal in one.
 URL_RE = re.compile(
-    r"\b([a-z][a-z0-9+.-]*://)(?:[^\s/@]+@)?([^\s/?#'\"]+)([^\s'\")]*)", re.I
+    r"\b([a-z][a-z0-9+.-]*://)(?:[^\s/@]+@)?([^\s/?#'\")]+)([^\s'\"]*)", re.I
 )
 # urllib3 errors name the path on its own ("with url: /v2/<key>").
-URL_PATH_RE = re.compile(r"(\burl: )/[^\s)]*", re.I)
+URL_PATH_RE = re.compile(r"(\burl: )(/[^\s'\"]*)", re.I)
 MAX_MESSAGE_LENGTH = 2_000
+
+
+def _closing_paren(rest: str) -> str:
+    """A trailing ")" that closes a parenthesis opened before the URL."""
+    return ")" if rest.endswith(")") and rest.count(")") > rest.count("(") else ""
 
 
 def _redact_url(match: re.Match[str]) -> str:
     scheme, host, rest = match.groups()
-    return f"{scheme}{host}" if rest in ("", "/") else f"{scheme}{host}/…"
+    close = _closing_paren(rest)
+    rest = rest[: len(rest) - len(close)]
+    return f"{scheme}{host}{'' if rest in ('', '/') else '/…'}{close}"
+
+
+def _redact_path(match: re.Match[str]) -> str:
+    prefix, path = match.groups()
+    return f"{prefix}/…{_closing_paren(path)}"
 
 
 def plain(text: Any) -> str:
@@ -44,7 +57,7 @@ def plain(text: Any) -> str:
     blobs, bounded length."""
     cleaned = CONTROL_RE.sub("", str(text))
     cleaned = URL_RE.sub(_redact_url, cleaned)
-    cleaned = URL_PATH_RE.sub(r"\1/…", cleaned)
+    cleaned = URL_PATH_RE.sub(_redact_path, cleaned)
     cleaned = LONG_HEX_RE.sub(
         lambda m: f"0x…({(len(m.group()) - 2) // 2} bytes hidden)", cleaned
     )

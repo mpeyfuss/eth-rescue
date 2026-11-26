@@ -126,6 +126,10 @@ OutcomeStatus = Literal["rescued", "partial", "unverified", "failed", "not_execu
 # Only outcomes with evidence of no effect are retried automatically.
 RETRYABLE: frozenset[OutcomeStatus] = frozenset({"failed", "not_executed"})
 
+# A plan call's EVM result: True succeeded, False reverted, None never ran, and
+# "unknown" when nothing shows whether EthRescue ran it.
+type CallResult = bool | None | Literal["unknown"]
+
 
 @dataclass(frozen=True)
 class ActionOutcome:

@@ -106,6 +106,23 @@ test("token metadata is fetched for held tokens only, in one batch", async () =>
   expect(requests).toContain("eth-mainnet.g.alchemy.com/v2/test-key");
 });
 
+test("a token metadata outage keeps the balances, unnamed", async () => {
+  const balances = await fixture("alchemy-token-balances");
+  serve((url, body) => {
+    if (url.host === "api.transient.xyz") return { next: null, results: [] };
+    if (url.pathname.includes("/nft/v3/")) return { ownedNfts: [], pageKey: null };
+    if (Array.isArray(body)) return new Response("rate limited", { status: 429 });
+    return { id: 1, result: balances };
+  });
+  const result = await scanWallet({ network: "mainnet", victim: VICTIM, alchemyKey: "test-key" });
+  expect(result.errors).toEqual([]);
+  expect(result.candidates.map((candidate) => candidate.detail.split(" · ")[0])).toEqual([
+    "5000000 base units",
+    "7 base units",
+  ]);
+  expect(result.warnings.map((w) => w.message)[0]).toStartWith("could not read token names and decimals");
+});
+
 test("an owner() RPC outage keeps the listings and marks the contracts", async () => {
   serve(transientRoute(await transient()));
   const result = await scan({ network: "mainnet", victim: VICTIM, alchemyKey: null }, async () => {

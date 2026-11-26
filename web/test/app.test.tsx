@@ -147,8 +147,8 @@ test("custom arguments are never saved in the browser", async () => {
   await paste(user, "Function signature", "f(uint256)");
   await paste(user, "arg 1 (uint256)", "78");
   const stored = JSON.parse(localStorage.getItem("eth-rescue:draft") ?? "{}");
-  expect(stored.actions[0].signature).toBe("f(uint256)");
-  expect(stored.actions[0].args).toEqual([]);
+  expect(stored.plan.actions[0].signature).toBe("f(uint256)");
+  expect(stored.plan.actions[0].args).toEqual([]);
 });
 
 test("install guide follows the chosen operating system", async () => {

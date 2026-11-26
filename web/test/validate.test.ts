@@ -35,6 +35,19 @@ test("safe must differ from victim", () => {
   expect(paths(plan({ safe: VICTIM.toLowerCase() }))).toEqual(["safe: must differ from the compromised wallet"]);
 });
 
+test("safe must not be the EthRescue contract", () => {
+  expect(paths(plan({ safe: "0xe9da4345f6ab43e05ff3de7999a99dc30710421a" }))).toEqual([
+    "safe: must not be the EthRescue contract: ETH sent there is lost",
+  ]);
+});
+
+test("a non-canonical signature is reported on the signature, not its args", () => {
+  const custom = { type: "custom", target: TOKEN, signature: "f(uint)", args: ["1"], gas: 50000 };
+  const issues = validatePlan({ ...plan(), actions: [custom] });
+  expect(issues.map((issue) => issue.path)).toEqual(["actions.0.signature"]);
+  expect(issues[0]?.message).toContain("f(uint256)");
+});
+
 test("gas wallet must differ from victim and safe", () => {
   expect(paths(plan({ gas_wallet: SAFE }))).toEqual(["gas_wallet: must differ from the compromised wallet and safe wallet"]);
 });

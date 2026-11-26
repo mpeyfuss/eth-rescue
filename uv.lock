@@ -293,6 +293,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "requests" },
     { name = "rich" },
+    { name = "urllib3" },
     { name = "web3" },
 ]
 
@@ -309,6 +310,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "requests", specifier = ">=2.32" },
     { name = "rich", specifier = ">=14.0.0" },
+    { name = "urllib3", specifier = ">=2" },
     { name = "web3", specifier = ">=7.16,<8" },
 ]
 

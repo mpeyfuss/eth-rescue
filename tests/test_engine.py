@@ -4,6 +4,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from eth_account import Account
 from eth_utils import keccak
 from hexbytes import HexBytes
 from web3.exceptions import TransactionNotFound
@@ -14,13 +15,15 @@ from eth_rescue.contract import ACTION_RESULT_TOPIC
 from eth_rescue.engine import ExitCode, Inclusion, RescueContext
 from eth_rescue.types import ActionOutcome, BundleTransaction, PreparedBundle
 
-VICTIM = SimpleNamespace(address="0x" + "11" * 20, key=b"\x01" * 32)
+VICTIM = Account.from_key(b"\x01" * 32)
 GAS = SimpleNamespace(address="0x" + "33" * 20, key=b"\x03" * 32)
 SAFE = "0x" + "22" * 20
 TARGET = "0x" + "44" * 20
 BAD_TARGET = "0x" + "66" * 20
 RESCUE_CONTRACT = "0x" + "55" * 20
 DELEGATED = b"\xef\x01\x00" + bytes.fromhex(RESCUE_CONTRACT[2:])
+ATTACKER_DELEGATE = "0x" + "99" * 20
+VICTIM_NONCE = 7
 BLOCK_TIME = 12
 _serial = itertools.count()
 
@@ -37,6 +40,12 @@ class Chain:
         self.balances = {GAS.address: gas_balance}
         self.code = {}
         self.gas_nonce = 3
+        self.victim_nonce = VICTIM_NONCE
+        # code as each block left it; later blocks read the latest
+        self.code_at = {}
+        self.blocks = {}
+        # rearranges a landing bundle's transactions within its block
+        self.arrange = lambda transactions: transactions
         self.receipts = {}
         self.visible_from = {}
         self.receipt_lag = 0
@@ -58,19 +67,29 @@ class Chain:
                 self.relay.on_block(self.block_number)
 
     def include(self, entries, block, results):
+        self.code_at[block - 1] = dict(self.code)
+        ours = []
         for position, (entry, (status, logs)) in enumerate(zip(entries, results)):
-            tx_hash = bytes(keccak(entry["signed_transaction"]))
+            signed = bytes(entry["signed_transaction"])
+            tx_hash = bytes(keccak(signed))
             self.receipts[tx_hash] = {
                 "blockNumber": block,
                 "blockHash": HexBytes(self.block_hash(block)),
-                "transactionIndex": position,
                 "transactionHash": HexBytes(tx_hash),
                 "status": status,
                 "logs": logs,
             }
             self.visible_from[tx_hash] = block + self.receipt_lag
-            if b"rescue-7702" in bytes(entry["signed_transaction"]):
+            authorizations = []
+            if b"rescue-7702" in signed:
                 self.code[VICTIM.address] = DELEGATED
+                if position == 0:
+                    authorizations = [authorization(RESCUE_CONTRACT, VICTIM_NONCE)]
+            ours.append(block_transaction(GAS.address, authorizations, tx_hash))
+        self.blocks[block] = self.arrange(ours)
+        for index, transaction in enumerate(self.blocks[block]):
+            if (receipt := self.receipts.get(bytes(transaction["hash"]))) is not None:
+                receipt["transactionIndex"] = index
         self.gas_nonce += 1
 
     def get_transaction_receipt(self, tx_hash):
@@ -79,14 +98,23 @@ class Chain:
             raise TransactionNotFound("not found")
         return self.receipts[key]
 
-    def get_block(self, number):
-        return {"number": number, "hash": HexBytes(self.block_hash(number))}
+    def get_block(self, identifier, full_transactions=False):
+        number = (
+            identifier if isinstance(identifier, int) else int.from_bytes(identifier)
+        )
+        block = {"number": number, "hash": HexBytes(self.block_hash(number))}
+        if full_transactions:
+            block["transactions"] = self.blocks.get(number, [])
+        return block
+
+    def get_transaction_count(self, address, block_identifier="latest"):
+        return self.victim_nonce if address == VICTIM.address else 0
 
     def get_balance(self, address):
         return self.balances.get(address, 0)
 
     def get_code(self, address, block_identifier="latest"):
-        return self.code.get(address, b"")
+        return self.code_at.get(block_identifier, self.code).get(address, b"")
 
 
 class Relay:
@@ -130,7 +158,7 @@ class Relay:
 def _make_bundle(chain, transactions, required=1000, predicted=(), target=None):
     return PreparedBundle(
         transactions=transactions,
-        victim_nonce=7,
+        victim_nonce=VICTIM_NONCE,
         gas_nonce=chain.gas_nonce,
         priority_fee=1,
         max_fee_per_gas=20,
@@ -174,6 +202,28 @@ def preparer_legacy(chain, required=1000):
         return _make_bundle(chain, transactions, required)
 
     return prepare
+
+
+def authorization(delegate, nonce, key=VICTIM.key, chain_id=1):
+    signed = Account.sign_authorization(
+        {"chainId": chain_id, "address": delegate, "nonce": nonce}, key
+    )
+    return {
+        "chainId": signed.chain_id,
+        "address": delegate,
+        "nonce": signed.nonce,
+        "yParity": signed.y_parity,
+        "r": HexBytes(signed.r.to_bytes(32)),
+        "s": HexBytes(signed.s.to_bytes(32)),
+    }
+
+
+def block_transaction(sender, authorizations=(), tx_hash=None):
+    return {
+        "hash": HexBytes(tx_hash or keccak(text=f"foreign-{next(_serial)}")),
+        "from": sender,
+        "authorizationList": list(authorizations),
+    }
 
 
 def action_logs(*results, address=VICTIM.address):
@@ -415,7 +465,7 @@ def test_half_visible_bundle_is_ambiguous_and_never_resubmitted(reporter, chain,
     result = engine.send_with_retry(ctx, PREPARED, preparer_legacy(chain))
 
     assert result is ExitCode.NOT_INCLUDED
-    assert "only some of the bundle" in reporter.messages("error")[0]
+    assert "Only some of the bundle" in reporter.messages("error")[0]
     assert len(relay.sent) == BUNDLE_BLOCK_RANGE
 
 
@@ -526,7 +576,50 @@ def test_wait_for_funding_times_out(reporter, chain, relay):
 
     assert not engine.wait_for_funding(ctx, 1000)
     assert chain.now == 60
-    assert reporter.messages("error") == ["Gas wallet was not funded in time."]
+
+
+def _fees_rise_after_block_101(chain, lagging_nonce=None):
+    """Bundles built after block 101 need more than the gas wallet holds; with
+    `lagging_nonce`, they also read the gas wallet's nonce from a stale node."""
+    base = preparer_legacy(chain)
+
+    def prepare(*args):
+        bundle = base(*args)
+        if chain.block_number <= 101:
+            return bundle
+        changes = {"required_funding": chain.balances[GAS.address] + 1}
+        if lagging_nonce is not None:
+            changes["gas_nonce"] = lagging_nonce
+        return replace(bundle, **changes)
+
+    return prepare
+
+
+def test_funding_timeout_after_a_submission_is_unknown(reporter, chain):
+    relay = Relay(chain, land=lambda entries, block: False)
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(ctx, PREPARED, _fees_rise_after_block_101(chain))
+
+    assert result is ExitCode.NOT_INCLUDED
+    [error] = reporter.messages("error")
+    assert error.startswith("Gas wallet was not funded in time.")
+    assert "Cannot tell whether the rescue landed" in error
+
+
+def test_funding_wait_stops_when_an_earlier_bundle_turns_up(reporter, chain):
+    relay = Relay(chain, land=lambda entries, block: block == 101)
+    chain.receipt_lag = BUNDLE_BLOCK_RANGE + 2
+    ctx = _ctx(reporter, chain, relay, funding_timeout=3600)
+
+    result = engine.send_with_retry(
+        ctx, PREPARED, _fees_rise_after_block_101(chain, lagging_nonce=chain.gas_nonce)
+    )
+
+    assert isinstance(result, Inclusion)
+    assert result.block == 101
+    assert chain.now < 3600
+    assert reporter.messages("error") == []
 
 
 # ---------------------------------------------------------------------------
@@ -566,15 +659,35 @@ def test_execution_results_ignores_logs_from_other_addresses():
     assert results == {3: True, 5: None}
 
 
-def test_execution_results_untrusted_logs_mean_nothing_ran():
+def test_execution_results_logs_of_other_code_mean_nothing_ran():
     transactions = [BundleTransaction("rescue-7702", b"a", batch_start=0, batch_size=2)]
     receipts = [{"status": 1, "logs": action_logs(True, True)}]
 
     results = engine.execution_results(
-        _inclusion(transactions, receipts), VICTIM.address, [0, 1], trust_logs=False
+        _inclusion(transactions, receipts), VICTIM.address, [0, 1], ran={0: False}
     )
 
     assert results == {0: None, 1: None}
+
+
+def test_execution_results_judges_each_batch_by_its_own_delegate():
+    transactions = [
+        BundleTransaction("rescue-7702", b"a", batch_start=0, batch_size=1),
+        BundleTransaction("rescue-7702", b"b", batch_start=1, batch_size=1),
+        BundleTransaction("rescue-7702", b"c", batch_start=2, batch_size=1),
+    ]
+    receipts = [{"status": 1, "logs": action_logs(True)}] * 2 + [
+        {"status": 0, "logs": []}
+    ]
+
+    results = engine.execution_results(
+        _inclusion(transactions, receipts),
+        VICTIM.address,
+        [0, 1, 2],
+        ran={0: True, 1: None, 2: None},
+    )
+
+    assert results == {0: True, 1: "unknown", 2: None}
 
 
 def test_execution_results_unlogged_or_reverted_batch_never_ran():
@@ -866,7 +979,22 @@ def test_fallback_leaves_out_an_action_that_starts_reverting_later(reporter, cha
     assert "Leaving out action #8" in reporter.messages("warning")[-1]
 
 
-def test_fallback_returns_none_when_every_action_is_left_out(reporter, chain):
+def test_fallback_returns_none_when_every_action_is_left_out_before_sending(
+    reporter, chain
+):
+    relay = Relay(chain, land=lambda entries, block: False)
+    relay.sim_error = lambda signed: "reverted" if b"|rescue|" in signed else None
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(
+        ctx, TWO_ACTIONS, preparer_legacy(chain), drop_failing=True
+    )
+
+    assert result is None
+    assert relay.sent == []
+
+
+def test_every_action_left_out_after_a_submission_is_unknown(reporter, chain):
     relay = Relay(chain, land=lambda entries, block: False)
     relay.sim_error = lambda signed: (
         "reverted" if chain.block_number > 101 and b"|rescue|" in signed else None
@@ -877,8 +1005,25 @@ def test_fallback_returns_none_when_every_action_is_left_out(reporter, chain):
         ctx, TWO_ACTIONS, preparer_legacy(chain), drop_failing=True
     )
 
-    assert result is None
+    assert result is ExitCode.NOT_INCLUDED
     assert len(relay.sent) == BUNDLE_BLOCK_RANGE
+    assert any("Cannot tell" in m for m in reporter.messages("error"))
+
+
+def test_every_action_left_out_still_finds_a_late_receipt(reporter, chain):
+    relay = Relay(chain, land=lambda entries, block: block == 101)
+    chain.receipt_lag = BUNDLE_BLOCK_RANGE + 1
+    relay.sim_error = lambda signed: (
+        "reverted" if chain.block_number > 101 and b"|rescue|" in signed else None
+    )
+    ctx = _ctx(reporter, chain, relay)
+
+    result = engine.send_with_retry(
+        ctx, TWO_ACTIONS, preparer_legacy(chain), drop_failing=True
+    )
+
+    assert isinstance(result, Inclusion)
+    assert result.block == 101
 
 
 def test_fallback_still_stops_when_its_funding_stops_simulating(reporter, chain):
@@ -1251,26 +1396,184 @@ def test_phase_2_leaves_out_an_action_that_reverts_in_a_later_window(
     assert any("Leaving out action #2" in m for m in reporter.messages("warning"))
 
 
-def test_run_ignores_logs_when_the_authorization_was_skipped(
-    reporter, chain, monkeypatch, offline
-):
+def _phase_1_statuses(chain, reporter, monkeypatch):
     _use_7702(monkeypatch, chain)
     relay = Relay(chain, outcome=lambda entries: [(1, action_logs(True))])
-    original = chain.include
-
-    def attacker_keeps_delegation(entries, block, results):
-        original(entries, block, results)
-        chain.code[VICTIM.address] = b"\xef\x01\x00" + b"\x99" * 20
-
-    chain.include = attacker_keeps_delegation
     ctx = _ctx(reporter, chain, relay)
-
     code = engine.run(ctx, [_custom()], confirm=lambda: True, legacy_fallback=False)
+    [(_data, outcomes)] = reporter.named("outcomes")
+    return code, [o.status for o in outcomes]
+
+
+def _skipped_warning(reporter):
+    return any("authorization was skipped" in m for m in reporter.messages("warning"))
+
+
+@pytest.mark.parametrize(
+    "ahead",
+    [
+        pytest.param(lambda: block_transaction(VICTIM.address), id="victim-tx"),
+        pytest.param(
+            lambda: block_transaction(
+                "0x" + "77" * 20, [authorization(ATTACKER_DELEGATE, VICTIM_NONCE)]
+            ),
+            id="victim-authorization",
+        ),
+    ],
+)
+def test_run_ignores_logs_when_an_earlier_transaction_spends_the_nonce(
+    reporter, chain, monkeypatch, offline, ahead
+):
+    chain.code[VICTIM.address] = b"\xef\x01\x00" + bytes.fromhex(ATTACKER_DELEGATE[2:])
+    chain.arrange = lambda ours: [ahead(), *ours]
+
+    code, statuses = _phase_1_statuses(chain, reporter, monkeypatch)
 
     assert code is ExitCode.UNRESCUED
+    assert statuses == ["not_executed"]
+    assert _skipped_warning(reporter)
+
+
+def test_run_ignores_logs_when_the_nonce_moved_before_the_block(
+    reporter, chain, monkeypatch, offline
+):
+    chain.victim_nonce = VICTIM_NONCE + 1
+
+    code, statuses = _phase_1_statuses(chain, reporter, monkeypatch)
+
+    assert statuses == ["not_executed"]
+    assert _skipped_warning(reporter)
+
+
+def test_run_trusts_logs_when_the_wallet_is_redelegated_later_in_the_block(
+    reporter, chain, monkeypatch, offline
+):
+    later = block_transaction(
+        "0x" + "77" * 20, [authorization(ATTACKER_DELEGATE, VICTIM_NONCE + 1)]
+    )
+    chain.arrange = lambda ours: [*ours, later]
+    original = chain.include
+
+    def redelegate(entries, block, results):
+        original(entries, block, results)
+        chain.code[VICTIM.address] = b"\xef\x01\x00" + bytes.fromhex(
+            ATTACKER_DELEGATE[2:]
+        )
+
+    chain.include = redelegate
+
+    code, statuses = _phase_1_statuses(chain, reporter, monkeypatch)
+
+    assert code is ExitCode.OK
+    assert statuses == ["unverified"]
+    assert not _skipped_warning(reporter)
+
+
+def test_run_trusts_logs_of_a_wallet_already_delegated_to_ethrescue(
+    reporter, chain, monkeypatch, offline
+):
+    chain.code[VICTIM.address] = DELEGATED
+    chain.arrange = lambda ours: [block_transaction(VICTIM.address), *ours]
+
+    code, statuses = _phase_1_statuses(chain, reporter, monkeypatch)
+
+    assert code is ExitCode.OK
+    assert statuses == ["unverified"]
+
+
+def test_run_ignores_invalid_victim_authorizations_ahead_of_the_rescue(
+    reporter, chain, monkeypatch, offline
+):
+    wrong_chain = authorization(ATTACKER_DELEGATE, VICTIM_NONCE, chain_id=5)
+    wrong_nonce = authorization(ATTACKER_DELEGATE, VICTIM_NONCE + 1)
+    other_signer = authorization(ATTACKER_DELEGATE, VICTIM_NONCE, key=b"\x09" * 32)
+    ahead = block_transaction(
+        "0x" + "77" * 20, [wrong_chain, wrong_nonce, other_signer]
+    )
+    chain.arrange = lambda ours: [ahead, *ours]
+
+    code, statuses = _phase_1_statuses(chain, reporter, monkeypatch)
+
+    assert code is ExitCode.OK
+    assert statuses == ["unverified"]
+
+
+def test_run_does_not_retry_calls_when_the_block_cannot_be_replayed(
+    reporter, chain, monkeypatch, offline
+):
+    def unreadable(identifier, full_transactions=False):
+        if full_transactions:
+            raise ConnectionError("timeout")
+        return Chain.get_block(chain, identifier)
+
+    chain.get_block = unreadable
+    _use_7702(monkeypatch, chain)
+    relay = Relay(chain, outcome=lambda entries: [(1, action_logs(True))])
+    ctx = _ctx(reporter, chain, relay)
+
+    engine.run(ctx, [_custom()], confirm=lambda: True)
+
     [(_data, outcomes)] = reporter.named("outcomes")
-    assert [o.status for o in outcomes] == ["not_executed"]
-    assert any("authorization was skipped" in m for m in reporter.messages("warning"))
+    assert [o.status for o in outcomes] == ["unverified"]
+    assert "could not tell whether the call ran" in outcomes[0].detail
+    assert not any("Phase 2" in str(p) for p in reporter.named("phase"))
+    assert any("Could not replay block" in m for m in reporter.messages("warning"))
+
+
+def test_run_does_not_trust_a_block_missing_authorization_lists(
+    reporter, chain, monkeypatch, offline
+):
+    original = chain.include
+
+    def without_authorizations(entries, block, results):
+        original(entries, block, results)
+        for transaction in chain.blocks[block]:
+            del transaction["authorizationList"]
+
+    chain.include = without_authorizations
+    _use_7702(monkeypatch, chain)
+    relay = Relay(chain, outcome=lambda entries: [(1, action_logs(True))])
+    ctx = _ctx(reporter, chain, relay)
+
+    engine.run(ctx, [_custom()], confirm=lambda: True)
+
+    [(_data, outcomes)] = reporter.named("outcomes")
+    assert [o.status for o in outcomes] == ["unverified"]
+    assert "could not tell whether the call ran" in outcomes[0].detail
+    assert any("without authorization lists" in m for m in reporter.messages("warning"))
+    assert not _skipped_warning(reporter)
+
+
+def test_run_judges_continuation_batches_by_the_delegate_they_ran_on(
+    reporter, chain, monkeypatch, offline
+):
+    def two_batches(w3, victim, gas, prepared, safe, extra, rescue_contract=None):
+        return _make_bundle(
+            chain,
+            [
+                BundleTransaction(
+                    "rescue-7702", _signed("rescue-7702"), batch_start=0, batch_size=1
+                ),
+                BundleTransaction(
+                    "rescue-7702", _signed("rescue-7702"), batch_start=1, batch_size=1
+                ),
+            ],
+            predicted=[True, True],
+        )
+
+    monkeypatch.setattr(engine, "prepare_7702_bundle", two_batches)
+    between = block_transaction(
+        "0x" + "77" * 20, [authorization(ATTACKER_DELEGATE, VICTIM_NONCE + 1)]
+    )
+    chain.arrange = lambda ours: [ours[0], between, *ours[1:]]
+    relay = Relay(chain, outcome=lambda entries: [(1, action_logs(True))] * 2)
+    ctx = _ctx(reporter, chain, relay)
+
+    engine.run(ctx, [_custom(), _custom()], confirm=lambda: True, legacy_fallback=False)
+
+    [(_data, outcomes)] = reporter.named("outcomes")[:1]
+    assert [o.status for o in outcomes] == ["unverified", "not_executed"]
+    assert _skipped_warning(reporter)
 
 
 def _typed(monkeypatch, outcomes):
@@ -1316,7 +1619,7 @@ def _delist_then_transfer():
     return calls
 
 
-def test_failed_delist_is_superseded_when_its_nft_was_rescued(
+def test_delist_counts_as_rescued_when_its_nft_was_rescued(
     reporter, chain, monkeypatch, offline
 ):
     _use_7702(monkeypatch, chain)
@@ -1333,7 +1636,12 @@ def test_failed_delist_is_superseded_when_its_nft_was_rescued(
     assert not any(
         b"|fund|" in bytes(e[0]["signed_transaction"]) for e, _t in relay.sent
     )
-    assert any("not needed" in m for m in reporter.messages("info"))
+    [(_data, outcomes)] = reporter.named("outcomes")
+    assert [o.status for o in outcomes] == ["rescued", "rescued"]
+    assert outcomes[0].detail == (
+        "the step after it was rescued; on its own: the call reverted"
+    )
+    assert reporter.messages("success")[-1] == "Rescue complete."
 
 
 def test_failed_delist_is_retried_when_its_nft_was_not_rescued(
@@ -1371,6 +1679,7 @@ def test_failed_delist_is_retried_when_its_nft_was_not_rescued(
     [
         ({"safe": GAS.address}, [TARGET]),
         ({"safe": "0x" + "00" * 20}, [TARGET]),
+        ({"safe": RESCUE_CONTRACT.upper().replace("0X", "0x")}, [TARGET]),
         ({}, ["0x" + "00" * 20]),
     ],
 )

@@ -14,7 +14,7 @@ from eth_rescue.abi import (
     OWNABLE2STEP_PENDING_OWNER_ABI,
     OWNABLE_OWNER_ABI,
 )
-from eth_rescue.types import ActionOutcome, CheckKind, RescueData
+from eth_rescue.types import ActionOutcome, CallResult, CheckKind, RescueData
 
 READ_ATTEMPTS = 3
 READ_RETRY_DELAY = 2.0
@@ -225,16 +225,19 @@ def _evaluate_owner(w3, index: int, check: Check, block, sleep) -> ActionOutcome
 
 
 def _evaluate_one(
-    w3, index: int, check: Check | None, executed: bool | None, balances, block, sleep
+    w3, index: int, check: Check | None, executed: CallResult, balances, block, sleep
 ) -> ActionOutcome:
     if executed is None:
         return ActionOutcome(index, "not_executed", "the call never ran")
     if executed is False:
         return ActionOutcome(index, "failed", "the call reverted")
     if check is None:
-        return ActionOutcome(
-            index, "unverified", "the call succeeded; confirm its effect manually"
+        detail = (
+            "could not tell whether the call ran; confirm its effect manually"
+            if executed == "unknown"
+            else "the call succeeded; confirm its effect manually"
         )
+        return ActionOutcome(index, "unverified", detail)
     if check.is_balance:
         return _evaluate_balance(index, check, balances)
     return _evaluate_owner(w3, index, check, block, sleep)
@@ -244,12 +247,13 @@ def evaluate_checks(
     w3: Web3,
     checks: dict[int, Check],
     snapshot: dict[BalanceKey, int | None],
-    executed: dict[int, bool | None],
+    executed: dict[int, CallResult],
     block: int,
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[ActionOutcome]:
-    """Classify each executed-or-not call in `executed` (call index -> EVM call
-    result, None when it never ran), reading state at the inclusion block."""
+    """Classify each call in `executed` (call index -> its result), reading
+    state at the inclusion block. A call whose result is unknown is judged by
+    its check alone."""
     balances = _Balances(w3, snapshot, block, sleep)
     return [
         _evaluate_one(w3, index, checks.get(index), result, balances, block, sleep)

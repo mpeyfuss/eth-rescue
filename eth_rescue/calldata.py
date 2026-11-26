@@ -16,6 +16,7 @@ from eth_abi.grammar import ABIType, BasicType, TupleType, normalize, parse
 from eth_utils import function_signature_to_4byte_selector, is_checksum_address
 from eth_utils import to_checksum_address
 
+MAX_SAFE_JSON_INTEGER = 2**53 - 1
 SIGNATURE_RE = re.compile(r"^([A-Za-z_$][A-Za-z0-9_$]*)\((.*)\)$", re.DOTALL)
 SUPPORTED_BASES = {"address", "bool", "string", "bytes", "uint", "int"}
 INTEGER_RE = re.compile(r"^(-?[0-9]+|0x[0-9a-fA-F]+)$")
@@ -80,6 +81,14 @@ def parse_signature(signature: str) -> list[ABIType]:
 def _to_int(value: Any, path: str) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
+    # A JavaScript JSON reader cannot tell 1e3 or 1000.0 from 1000, so the web
+    # builder accepts them as exact integers; so does this, within the same range.
+    if (
+        isinstance(value, float)
+        and value.is_integer()
+        and abs(value) <= MAX_SAFE_JSON_INTEGER
+    ):
+        return int(value)
     if isinstance(value, str) and INTEGER_RE.match(value):
         return int(value, 16) if value.startswith("0x") else int(value)
     raise CalldataError(f"{path}: expected an integer or a decimal/0x string")

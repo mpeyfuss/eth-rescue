@@ -10,6 +10,7 @@ from eth_account.signers.local import LocalAccount
 from eth_utils import to_canonical_address, to_checksum_address, to_hex
 from hexbytes import HexBytes
 from web3 import Web3
+from web3.exceptions import ContractLogicError
 from web3.types import BlockData, BlockIdentifier
 
 from eth_rescue.calldata import build_calldata
@@ -210,12 +211,17 @@ def prepare_actions(rescue_data: list[RescueData]) -> list[PreparedAction]:
     return prepared
 
 
-def _estimate(w3: Web3, transaction: dict, override: dict | None) -> int:
-    """Estimate with a state override, or without one when the RPC refuses it."""
+def _estimate_without_code(w3: Web3, transaction: dict) -> int:
+    """Estimate `transaction` as if its sender had no code. The override only
+    hides a delegation, so an RPC that refuses overrides is asked plainly only
+    when the sender has none; a revert is final either way."""
+    sender = transaction["from"]
     try:
-        return w3.eth.estimate_gas(transaction, state_override=override)
-    except Exception:
-        if override is None:
+        return w3.eth.estimate_gas(transaction, state_override={sender: {"code": "0x"}})
+    except ContractLogicError:
+        raise
+    except Exception:  # most likely no state-override support
+        if w3.eth.get_code(sender):
             raise
     return w3.eth.estimate_gas(transaction)
 
@@ -235,13 +241,12 @@ def size_actions(
     Returns the sized actions and the reason for each action whose estimate
     failed; those keep their floor.
     """
-    undelegated = {sender: {"code": "0x"}}
     sized: list[PreparedAction] = []
     failures: dict[int, str] = {}
     for index, action in enumerate(prepared):
         transaction = {"from": sender, "to": action["to"], "data": action["data"]}
         try:
-            estimate = _estimate(w3, transaction, undelegated)
+            estimate = _estimate_without_code(w3, transaction)
         except Exception as e:  # reverts and RPC refusals look alike here
             failures[index] = str(e)
             sized.append(action)
@@ -658,13 +663,15 @@ def prepare_bundle(
     victim_funding = _victim_funding_value(
         gas_limits, max_fee_per_gas, effective_fee_cap, sweep_gas
     )
-    # The sweep is signed before anyone knows the gas actually used, so unused
-    # gas stays behind in the compromised wallet.
+    # The sweep is signed before anyone knows the gas actually used, so the gas
+    # reserve for every transaction, the sweep's own included, stays behind
+    # except what is actually spent.
+    reserve = (sum(gas_limits) + sweep_gas) * effective_fee_cap
     leftover_warning = (
-        "The fallback funds the compromised wallet for every action's full gas "
-        "limit; gas the actions leave unused, up to "
-        f"{Web3.from_wei(rescue_fee_cap, 'ether')} ETH, stays in that wallet, "
-        "where a sweeper can take it."
+        "The fallback funds the compromised wallet for every transaction's full "
+        "gas limit; whatever gas is left unused, up to "
+        f"{Web3.from_wei(reserve, 'ether')} ETH, stays in that wallet, where a "
+        "sweeper can take it."
     )
 
     fees = {

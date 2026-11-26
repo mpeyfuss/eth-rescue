@@ -5,26 +5,24 @@ import { InstallSection } from "./components/InstallSection";
 import { ReviewSection } from "./components/ReviewSection";
 import { SetupSection } from "./components/SetupSection";
 import { ThemeSwitch } from "./components/ThemeSwitch";
-import { type Draft, draftReducer, emptyDraft, fromPlan, PlanImportError, staleDiscoveries, toPlan } from "./plan/draft";
-import { importPlan, persistablePlan } from "./plan/importPlan";
+import { type Draft, draftReducer, emptyDraft, PlanImportError, staleDiscoveries, toPlan } from "./plan/draft";
+import { importPlan } from "./plan/importPlan";
+import { deserializeDraft, serializeDraft } from "./plan/storage";
 import { validatePlan } from "./plan/validate";
 
-// Kept across reloads: addresses and typed actions. Custom arguments and
-// anything that looks like a secret are left out (see persistablePlan).
 const STORAGE_KEY = "eth-rescue:draft";
 
 function loadStoredDraft(): Draft {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    return stored ? fromPlan(JSON.parse(stored)) : emptyDraft();
+    return deserializeDraft(localStorage.getItem(STORAGE_KEY));
   } catch {
     return emptyDraft();
   }
 }
 
-function storeDraft(plan: Record<string, unknown>) {
+function storeDraft(draft: Draft) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(persistablePlan(plan)));
+    localStorage.setItem(STORAGE_KEY, serializeDraft(draft));
   } catch {
     // Storage is a convenience only.
   }
@@ -48,7 +46,7 @@ export function App({ scan }: { scan?: Scan } = {}) {
   const issues = useMemo(() => [...validatePlan(plan), ...staleDiscoveries(draft)], [plan, draft]);
   const issueByPath = useMemo(() => new Map(issues.map((issue) => [issue.path, issue.message])), [issues]);
 
-  useEffect(() => storeDraft(plan), [plan]);
+  useEffect(() => storeDraft(draft), [draft]);
 
   const errorFor = (path: string, value: string) => (revealed || value.trim() ? issueByPath.get(path) : undefined);
 

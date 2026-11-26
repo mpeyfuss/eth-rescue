@@ -1,0 +1,171 @@
+from types import SimpleNamespace
+
+import pytest
+from eth_abi import decode
+from eth_account import Account
+from eth_account.messages import encode_typed_data
+from eth_utils import keccak, to_checksum_address
+
+from eth_rescue import contract
+
+COMPROMISED = Account.from_key("0x" + "0a" * 32)
+REQUEST = contract.RescueRequest(
+    rescuer="0x" + "11" * 20,
+    destination="0x" + "22" * 20,
+    deadline=1_700_000_000,
+    actions_hash=keccak(b"actions"),
+)
+
+
+def test_rescue_selector_matches_signature():
+    assert (
+        contract.RESCUE_SELECTOR
+        == keccak(
+            text="rescue((address,address,uint256,bytes32),(address,uint256,bytes)[],bytes)"
+        )[:4]
+    )
+
+
+def test_actions_hash_is_keccak_of_abi_encoded_actions():
+    prepared = [{"to": "0x" + "33" * 20, "data": "0xdeadbeef", "gas": 70_000}]
+
+    expected = keccak(
+        bytes.fromhex(
+            "0000000000000000000000000000000000000000000000000000000000000020"
+            "0000000000000000000000000000000000000000000000000000000000000001"
+            "0000000000000000000000000000000000000000000000000000000000000020"
+            "0000000000000000000000003333333333333333333333333333333333333333"
+            "0000000000000000000000000000000000000000000000000000000000011170"
+            "0000000000000000000000000000000000000000000000000000000000000060"
+            "0000000000000000000000000000000000000000000000000000000000000004"
+            "deadbeef00000000000000000000000000000000000000000000000000000000"
+        )
+    )
+    assert contract.actions_hash(prepared) == expected
+
+
+def test_sign_rescue_request_recovers_to_compromised_over_compromised_domain():
+    signature = contract.sign_rescue_request(
+        COMPROMISED.key, 1, COMPROMISED.address, REQUEST
+    )
+
+    message = encode_typed_data(
+        domain_data={
+            "name": "EthRescue",
+            "version": "1",
+            "chainId": 1,
+            "verifyingContract": COMPROMISED.address,
+        },
+        message_types=contract.RESCUE_REQUEST_TYPES,
+        message_data={
+            "rescuer": REQUEST.rescuer,
+            "destination": REQUEST.destination,
+            "deadline": REQUEST.deadline,
+            "actionsHash": REQUEST.actions_hash,
+        },
+    )
+    assert len(signature) == 65
+    assert Account.recover_message(message, signature=signature) == COMPROMISED.address
+
+
+def test_signatures_differ_across_chains():
+    assert contract.sign_rescue_request(
+        COMPROMISED.key, 1, COMPROMISED.address, REQUEST
+    ) != contract.sign_rescue_request(
+        COMPROMISED.key, 11155111, COMPROMISED.address, REQUEST
+    )
+
+
+def test_encode_rescue_call_round_trips():
+    prepared = [
+        {"to": "0x" + "33" * 20, "data": "0xdeadbeef", "gas": 70_000},
+        {"to": "0x" + "44" * 20, "data": "0x", "gas": 40_000},
+    ]
+    signature = b"\x01" * 65
+
+    calldata = contract.encode_rescue_call(REQUEST, prepared, signature)
+
+    assert calldata[:4] == contract.RESCUE_SELECTOR
+    request, actions, decoded_signature = decode(
+        [contract.REQUEST_TYPE, contract.ACTIONS_TYPE, "bytes"], calldata[4:]
+    )
+    assert (to_checksum_address(request[0]), request[2]) == (
+        to_checksum_address(REQUEST.rescuer),
+        REQUEST.deadline,
+    )
+    assert request[3] == REQUEST.actions_hash
+    target, stipend, action_data = actions[0]
+    assert to_checksum_address(target) == to_checksum_address(prepared[0]["to"])
+    assert (stipend, action_data) == (70_000, bytes.fromhex("deadbeef"))
+    assert actions[1][2] == b""
+    assert decoded_signature == signature
+
+
+def _code_chain(code, typehash=contract.RESCUE_REQUEST_TYPEHASH):
+    def call(transaction):
+        assert transaction["data"] == "0x" + contract.TYPEHASH_SELECTOR.hex()
+        if isinstance(typehash, Exception):
+            raise typehash
+        return typehash
+
+    return SimpleNamespace(
+        eth=SimpleNamespace(get_code=lambda address: code, call=call)
+    )
+
+
+RUNTIME = b"\x60\x80\x60\x40"
+ADDRESS = "0x" + "55" * 20
+
+
+def test_require_rescue_contract_accepts_pinned_codehash():
+    contract.require_rescue_contract(
+        _code_chain(RUNTIME), ADDRESS, contract.runtime_codehash(RUNTIME)
+    )
+
+
+def test_require_rescue_contract_rejects_other_codehash():
+    with pytest.raises(contract.RescueContractError, match="expected EthRescue build"):
+        contract.require_rescue_contract(
+            _code_chain(RUNTIME + b"\x00"), ADDRESS, contract.runtime_codehash(RUNTIME)
+        )
+
+
+def test_require_rescue_contract_without_pin_checks_typehash():
+    contract.require_rescue_contract(_code_chain(RUNTIME), ADDRESS)
+
+    with pytest.raises(contract.RescueContractError, match="not EthRescue"):
+        contract.require_rescue_contract(_code_chain(RUNTIME, b"\x00" * 32), ADDRESS)
+    with pytest.raises(contract.RescueContractError, match="not EthRescue"):
+        contract.require_rescue_contract(
+            _code_chain(RUNTIME, ValueError("revert")), ADDRESS
+        )
+
+
+def test_require_rescue_contract_rejects_empty_address():
+    with pytest.raises(contract.RescueContractError, match="No EthRescue contract"):
+        contract.require_rescue_contract(_code_chain(b""), ADDRESS)
+
+
+def test_require_rescue_contract_rejects_delegated_account():
+    code = contract.DELEGATION_DESIGNATOR_PREFIX + b"\x11" * 20
+
+    with pytest.raises(contract.RescueContractError, match="delegated account"):
+        contract.require_rescue_contract(
+            _code_chain(code), ADDRESS, contract.runtime_codehash(code)
+        )
+
+
+def test_rescue_request_typehash_matches_the_eip712_type():
+    assert contract.RESCUE_REQUEST_TYPEHASH == keccak(
+        text="RescueRequest(address rescuer,address destination,uint256 deadline,"
+        "bytes32 actionsHash)"
+    )
+
+
+def test_decode_rescue_results():
+    from eth_abi import encode
+
+    assert contract.decode_rescue_results(encode(["bool[]"], [[True, False]])) == [
+        True,
+        False,
+    ]

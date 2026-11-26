@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "network": "mainnet",
+  "compromised": "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61",
+  "destination": "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1",
+  "actions": [
+    {
+      "type": "superrare_v1",
+      "label": "SuperRare #43",
+      "token_id": "43"
+    }
+  ]
+}

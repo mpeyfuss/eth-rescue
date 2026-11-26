@@ -8,11 +8,21 @@ wheels/
 *_cache/
 
 # Foundry files
-tests/integration/contracts/cache/
-tests/integration/contracts/out/
+cache/
+out/
+dependencies/
+**/broadcast/**/dry-run/
+**/broadcast/**/*.lock
+**/broadcast/**/run-latest.json
+
+# Web
+web/node_modules
+*/node_modules
 
 # Virtual environments
 .venv
 
 # Secrets
 .env
+.env.local
+.env.*.local

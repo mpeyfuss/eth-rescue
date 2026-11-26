@@ -1,0 +1,32 @@
+{
+  "ownedNfts": [
+    {
+      "contract": { "address": "0xb8cef6f20a2a14c6282956c61acadd3cc7e05fac", "name": "Before the Frame", "symbol": "BTF", "tokenType": "ERC721", "isSpam": false },
+      "tokenId": "3",
+      "tokenType": "ERC721",
+      "name": "Frame #3",
+      "balance": "1"
+    },
+    {
+      "contract": { "address": "0xfddc38b22db959a2943e47f9d3d6ecbc6d7c9437", "name": "Intertwined Odyssey", "symbol": "IO", "tokenType": "ERC1155", "isSpam": false },
+      "tokenId": "2",
+      "tokenType": "ERC1155",
+      "name": null,
+      "balance": "4"
+    },
+    {
+      "contract": { "address": "0x2222222222222222222222222222222222222222", "name": "Claim your reward", "symbol": "SPAM", "tokenType": "ERC1155", "isSpam": true },
+      "tokenId": "1",
+      "tokenType": "ERC1155",
+      "name": "Free airdrop",
+      "balance": "1"
+    },
+    {
+      "contract": { "address": "0x3333333333333333333333333333333333333333", "name": "Oddity", "tokenType": "NO_SUPPORTED_NFT_STANDARD" },
+      "tokenId": "9",
+      "tokenType": "NO_SUPPORTED_NFT_STANDARD"
+    }
+  ],
+  "totalCount": 4,
+  "pageKey": null
+}

@@ -1,0 +1,89 @@
+{
+ "count": 2,
+ "next": null,
+ "previous": null,
+ "results": [
+  {
+   "id": 15446,
+   "name": "Intertwined Odyssey",
+   "symbol": "IO",
+   "description": "Through the quiet language of monochrome photography, moments of reality become canvases for another imagination. Two artistic visions intertwine, transforming captured moments into worlds beyond their origins. Each collaboration begins a new odyssey, where individuality meets, stories unfold, and something extraordinary is born from the beauty of creating together.",
+   "external_url": "",
+   "source": "TL",
+   "contract_type": "ERC1155TL",
+   "version": {
+    "major": 4,
+    "minor": 1,
+    "patch": 2
+   },
+   "uri": "/nfts/ethereum/0xfddc38b22db959a2943e47f9d3d6ecbc6d7c9437",
+   "address": {
+    "raw_address": "0xfddc38b22db959a2943e47f9d3d6ecbc6d7c9437",
+    "chain": "1",
+    "ecosystem": "EVM"
+   },
+   "user": {
+    "id": 7276,
+    "username": "creator",
+    "display_name": "Creator",
+    "pfp": "",
+    "uri": "",
+    "x_username": "",
+    "superrare": "",
+    "first_time_user": false,
+    "curated": false,
+    "creator": true,
+    "joined_at": "2025-03-14T01:32:06.043870Z",
+    "updated_at": "2026-10-28T23:57:29.364858Z"
+   },
+   "is_1155_compatible": true,
+   "is_indexed_to_superrare": false,
+   "onchain_at": "2026-10-18T21:02:11Z",
+   "created_at": "2026-10-18T21:02:20.932931Z",
+   "updated_at": "2026-10-18T21:02:21.084386Z",
+   "image_uri": "https://ipfs.transientusercontent.xyz/ipfs/bafybeieuyszvju7dtc6hx3ngjpmmccurmgcvoqrnkritdjx3mb6t7mglgi/media",
+   "num_tokens": 2
+  },
+  {
+   "id": 14980,
+   "name": "Before the Frame",
+   "symbol": "BTF",
+   "description": "Before the Frame is a monochrome study of the moment something ordinary suddenly asks to be seen. Through light, perspective, shadow, and stillness, familiar surroundings become remarkable again. A reminder that beauty is everywhere when we slow down long enough to notice it.",
+   "external_url": "",
+   "source": "TL",
+   "contract_type": "ERC721TL",
+   "version": {
+    "major": 4,
+    "minor": 1,
+    "patch": 2
+   },
+   "uri": "/nfts/ethereum/0xb8cef6f20a2a14c6282956c61acadd3cc7e05fac",
+   "address": {
+    "raw_address": "0xb8cef6f20a2a14c6282956c61acadd3cc7e05fac",
+    "chain": "1",
+    "ecosystem": "EVM"
+   },
+   "user": {
+    "id": 7276,
+    "username": "creator",
+    "display_name": "Creator",
+    "pfp": "",
+    "uri": "",
+    "x_username": "",
+    "superrare": "",
+    "first_time_user": false,
+    "curated": false,
+    "creator": true,
+    "joined_at": "2025-03-14T01:32:06.043870Z",
+    "updated_at": "2026-10-28T23:57:29.364858Z"
+   },
+   "is_1155_compatible": false,
+   "is_indexed_to_superrare": false,
+   "onchain_at": "2026-10-03T23:48:35Z",
+   "created_at": "2026-10-03T23:48:40.047046Z",
+   "updated_at": "2026-10-04T00:19:23.436119Z",
+   "image_uri": "https://ipfs.transientusercontent.xyz/ipfs/bafybeihsqp2mfs37g2t4knwkh53eok4mmfqvutrdgeex2ihdiqpxkl75gy/media",
+   "num_tokens": 16
+  }
+ ]
+}

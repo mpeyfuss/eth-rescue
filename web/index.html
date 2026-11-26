@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <title>ETH Rescue</title>
+    <meta
+      name="description"
+      content="Recover tokens, NFTs, and contract ownership from a compromised Ethereum wallet using a separate wallet to pay gas."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://eth-rescue.marcopeyfuss.com/" />
+    <meta property="og:title" content="ETH Rescue" />
+    <meta
+      property="og:description"
+      content="Recover tokens, NFTs, and contract ownership from a compromised Ethereum wallet using a separate wallet to pay gas."
+    />
+    <meta property="og:image" content="https://eth-rescue.marcopeyfuss.com/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="ETH Rescue" />
+    <meta
+      name="twitter:description"
+      content="Recover tokens, NFTs, and contract ownership from a compromised Ethereum wallet using a separate wallet to pay gas."
+    />
+    <meta name="twitter:image" content="https://eth-rescue.marcopeyfuss.com/og.png" />
+    <script>
+      // Applies the saved theme before first paint; mirrors src/theme.ts.
+      (function () {
+        var choice = null;
+        try {
+          choice = localStorage.getItem("eth-rescue:theme");
+        } catch (e) {}
+        if (choice !== "light" && choice !== "dark") {
+          choice = window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.dataset.theme = choice;
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

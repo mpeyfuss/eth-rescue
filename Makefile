@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-integration test-all
+.PHONY: fmt lint schema test test-unit test-integration test-fork test-all web-install web-dev web-test web-build
 
 fmt:
 	uv run ruff format .
@@ -6,14 +6,43 @@ fmt:
 lint:
 	uv run ruff check . --fix
 
+schema:
+	uv run eth-rescue schema > schema/plan.v1.schema.json
+	cd web && bun run gen:types
+
 test: test-unit
 
 test-unit:
 	uv run pytest -m "not integration"
 
+# Every integration run covers the live fork and the next one (Amsterdam /
+# Glamsterdam, with EIP-8037 state gas) so gas-schedule breakage shows up early.
 test-integration:
+	forge build --root contracts
 	forge build --root tests/integration/contracts
-	RUN_ANVIL_INTEGRATION=1 uv run pytest -m integration
+	RUN_ANVIL_INTEGRATION=1 ANVIL_HARDFORK=osaka uv run pytest -m integration
+	RUN_ANVIL_INTEGRATION=1 ANVIL_HARDFORK=amsterdam uv run pytest -m integration
 
-test-all:
-	RUN_ANVIL_INTEGRATION=1 uv run pytest
+# The integration suite on a fork of a live network, against its EthRescue
+# deployment. Needs network access; FORK_HARDFORK must match the live chain.
+FORK_NETWORK ?= sepolia
+FORK_HARDFORK ?= osaka
+
+test-fork:
+	forge build --root contracts
+	forge build --root tests/integration/contracts
+	RUN_ANVIL_INTEGRATION=1 FORK_NETWORK=$(FORK_NETWORK) ANVIL_HARDFORK=$(FORK_HARDFORK) uv run pytest -m integration
+
+test-all: test-unit test-integration web-test
+
+web-install:
+	cd web && bun install --frozen-lockfile
+
+web-dev:
+	cd web && bun run dev
+
+web-test:
+	cd web && bun run typecheck && bun test
+
+web-build:
+	cd web && bun run build

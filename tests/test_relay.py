@@ -7,10 +7,19 @@ from eth_account import Account, messages
 from hexbytes import HexBytes
 from web3 import Web3
 
-from eth_rescue.relay import RelayClient, RelayError, RelayRPCError
+from eth_rescue.relay import (
+    MAX_ERROR_LENGTH,
+    RelayClient,
+    RelayError,
+    RelayRPCError,
+    RelayTimeout,
+)
 
 
 class Response:
+    ok = True
+    status_code = 200
+
     def __init__(self, payload):
         self.payload = payload
 
@@ -40,11 +49,12 @@ def test_send_bundle_signs_exact_json_rpc_body(monkeypatch):
         "eth_rescue.relay.requests.post",
         lambda url, **kwargs: requests.append((url, kwargs)) or Response(response),
     )
-    w3 = SimpleNamespace(keccak=lambda value: HexBytes(b"\x11" * 32))
     signer = Account.create()
-    client = RelayClient(w3, signer, "https://relay.example", builders=["builder"])
+    client = RelayClient(
+        SimpleNamespace(), signer, "https://relay.example", builders=["builder"]
+    )
 
-    submission = client.send_bundle(
+    bundle_hash = client.send_bundle(
         [{"signed_transaction": HexBytes("0x1234")}], target_block_number=42
     )
 
@@ -65,7 +75,7 @@ def test_send_bundle_signs_exact_json_rpc_body(monkeypatch):
         messages.encode_defunct(text=digest), signature=signature
     )
     assert address == recovered == signer.address
-    assert submission.bundle_hash == "0xabc"
+    assert bundle_hash == "0xabc"
 
 
 def test_send_bundle_omits_builders_when_not_configured(monkeypatch):
@@ -137,15 +147,32 @@ def test_simulate_rejects_missing_transaction_results(monkeypatch):
         client.simulate([], block_tag=100)
 
 
-def test_request_wraps_transport_and_invalid_json_errors(monkeypatch):
+def test_request_reports_transport_errors_by_type_only(monkeypatch):
     client = _client()
 
     def raise_transport(*args, **kwargs):
-        raise requests.ConnectionError("offline")
+        raise requests.ConnectionError("https://user:secret@relay.example offline")
 
     monkeypatch.setattr("eth_rescue.relay.requests.post", raise_transport)
-    with pytest.raises(RelayError, match="offline"):
+    with pytest.raises(RelayError) as error:
         client._request("eth_test", [{}])
+
+    assert str(error.value) == "Relay request failed: ConnectionError"
+
+
+def test_request_reports_timeouts_distinctly(monkeypatch):
+    client = _client()
+
+    def time_out(*args, **kwargs):
+        raise requests.Timeout("slow")
+
+    monkeypatch.setattr("eth_rescue.relay.requests.post", time_out)
+    with pytest.raises(RelayTimeout):
+        client._request("eth_test", [{}])
+
+
+def test_request_rejects_non_json_response(monkeypatch):
+    client = _client()
 
     class InvalidJSONResponse(Response):
         def json(self):
@@ -155,25 +182,45 @@ def test_request_wraps_transport_and_invalid_json_errors(monkeypatch):
         "eth_rescue.relay.requests.post",
         lambda *args, **kwargs: InvalidJSONResponse({}),
     )
-    with pytest.raises(RelayError, match="invalid json"):
+    with pytest.raises(RelayError, match="was not JSON"):
         client._request("eth_test", [{}])
 
 
-def test_request_includes_sanitized_http_error_response(monkeypatch):
-    client = _client()
+def _http_error(status, body):
     response = requests.Response()
-    response.status_code = 403
+    response.status_code = status
     response.url = "https://relay.example"
-    response._content = b"  request  blocked\nby policy  "
+    response._content = body
+    return response
 
+
+def test_http_error_never_echoes_the_response_body(monkeypatch):
+    client = _client()
+    signed = "0x02" + "ab" * 200
+    body = json.dumps({"request": {"params": [{"txs": [signed]}]}}).encode()
     monkeypatch.setattr(
-        "eth_rescue.relay.requests.post", lambda *args, **kwargs: response
+        "eth_rescue.relay.requests.post",
+        lambda *args, **kwargs: _http_error(400, body),
     )
 
-    with pytest.raises(
-        RelayError, match=r"403 Client Error.*Response: request blocked by policy"
-    ):
+    with pytest.raises(RelayError) as error:
         client._request("eth_test", [{}])
+
+    assert str(error.value) == "Relay request failed with HTTP 400"
+
+
+def test_http_error_includes_bounded_json_rpc_message(monkeypatch):
+    client = _client()
+    body = json.dumps({"error": {"code": -1, "message": "blocked " * 100}}).encode()
+    monkeypatch.setattr(
+        "eth_rescue.relay.requests.post",
+        lambda *args, **kwargs: _http_error(403, body),
+    )
+
+    with pytest.raises(RelayError, match=r"HTTP 403: blocked") as error:
+        client._request("eth_test", [{}])
+
+    assert len(str(error.value)) < MAX_ERROR_LENGTH + 50
 
 
 def test_request_raises_typed_rpc_error(monkeypatch):
@@ -193,6 +240,28 @@ def test_request_raises_typed_rpc_error(monkeypatch):
         client._request("eth_test", [{}])
 
     assert error.value.code == -32000
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"jsonrpc": "2.0", "id": 1, "error": None, "result": "ok"}, "ok"),
+        ({"jsonrpc": "2.0", "id": 1, "error": "rate limited"}, RelayRPCError),
+        (["not", "an", "object"], RelayError),
+    ],
+    ids=["null-error", "string-error", "array"],
+)
+def test_request_tolerates_odd_json_rpc_shapes(monkeypatch, payload, expected):
+    client = _client()
+    monkeypatch.setattr(
+        "eth_rescue.relay.requests.post", lambda *args, **kwargs: Response(payload)
+    )
+
+    if isinstance(expected, type):
+        with pytest.raises(expected):
+            client._request("eth_test", [{}])
+    else:
+        assert client._request("eth_test", [{}]) == expected
 
 
 def test_request_rejects_response_without_result(monkeypatch):

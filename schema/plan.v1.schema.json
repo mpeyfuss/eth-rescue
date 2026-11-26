@@ -1,0 +1,544 @@
+{
+  "$defs": {
+    "CryptoPunkAction": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "gas": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 8000000,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gas"
+        },
+        "type": {
+          "const": "cryptopunk",
+          "title": "Type",
+          "type": "string"
+        },
+        "token_id": {
+          "pattern": "^[0-9]{1,4}$",
+          "title": "Token Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "token_id"
+      ],
+      "title": "CryptoPunkAction",
+      "type": "object"
+    },
+    "CustomAction": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "type": {
+          "const": "custom",
+          "title": "Type",
+          "type": "string"
+        },
+        "target": {
+          "pattern": "^0x[0-9a-fA-F]{40}$",
+          "title": "Target",
+          "type": "string"
+        },
+        "signature": {
+          "pattern": "^[A-Za-z_$][A-Za-z0-9_$]*\\(.*\\)$",
+          "title": "Signature",
+          "type": "string"
+        },
+        "args": {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Args",
+          "type": "array"
+        },
+        "gas": {
+          "exclusiveMinimum": 0,
+          "maximum": 8000000,
+          "title": "Gas",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "target",
+        "signature",
+        "args",
+        "gas"
+      ],
+      "title": "CustomAction",
+      "type": "object"
+    },
+    "Erc1155Action": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "gas": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 8000000,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gas"
+        },
+        "type": {
+          "const": "erc1155",
+          "title": "Type",
+          "type": "string"
+        },
+        "contract": {
+          "pattern": "^0x[0-9a-fA-F]{40}$",
+          "title": "Contract",
+          "type": "string"
+        },
+        "token_id": {
+          "pattern": "^[0-9]{1,78}$",
+          "title": "Token Id",
+          "type": "string"
+        },
+        "amount": {
+          "maxLength": 78,
+          "pattern": "^0*[1-9][0-9]*$",
+          "title": "Amount",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "contract",
+        "token_id",
+        "amount"
+      ],
+      "title": "Erc1155Action",
+      "type": "object"
+    },
+    "Erc20Action": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "gas": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 8000000,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gas"
+        },
+        "type": {
+          "const": "erc20",
+          "title": "Type",
+          "type": "string"
+        },
+        "contract": {
+          "pattern": "^0x[0-9a-fA-F]{40}$",
+          "title": "Contract",
+          "type": "string"
+        },
+        "amount": {
+          "maxLength": 78,
+          "pattern": "^0*[1-9][0-9]*$",
+          "title": "Amount",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "contract",
+        "amount"
+      ],
+      "title": "Erc20Action",
+      "type": "object"
+    },
+    "Erc721Action": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "gas": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 8000000,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gas"
+        },
+        "type": {
+          "const": "erc721",
+          "title": "Type",
+          "type": "string"
+        },
+        "contract": {
+          "pattern": "^0x[0-9a-fA-F]{40}$",
+          "title": "Contract",
+          "type": "string"
+        },
+        "token_id": {
+          "pattern": "^[0-9]{1,78}$",
+          "title": "Token Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "contract",
+        "token_id"
+      ],
+      "title": "Erc721Action",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "Options": {
+      "additionalProperties": false,
+      "properties": {
+        "priority_fee_gwei": {
+          "default": "0",
+          "pattern": "^[0-9]+(\\.[0-9]{1,9})?$",
+          "title": "Priority Fee Gwei",
+          "type": "string"
+        },
+        "max_blocks": {
+          "default": 25,
+          "exclusiveMinimum": 0,
+          "title": "Max Blocks",
+          "type": "integer"
+        },
+        "legacy_fallback": {
+          "default": true,
+          "title": "Legacy Fallback",
+          "type": "boolean"
+        }
+      },
+      "title": "Options",
+      "type": "object"
+    },
+    "OwnershipAction": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "gas": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 8000000,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gas"
+        },
+        "type": {
+          "const": "ownership",
+          "title": "Type",
+          "type": "string"
+        },
+        "contract": {
+          "pattern": "^0x[0-9a-fA-F]{40}$",
+          "title": "Contract",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "contract"
+      ],
+      "title": "OwnershipAction",
+      "type": "object"
+    },
+    "SuperRareV1Action": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "gas": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 8000000,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gas"
+        },
+        "type": {
+          "const": "superrare_v1",
+          "title": "Type",
+          "type": "string"
+        },
+        "token_id": {
+          "pattern": "^[0-9]{1,78}$",
+          "title": "Token Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "token_id"
+      ],
+      "title": "SuperRareV1Action",
+      "type": "object"
+    },
+    "TransientDelistErc721Action": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "gas": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 8000000,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gas"
+        },
+        "type": {
+          "const": "transient_delist_erc721",
+          "title": "Type",
+          "type": "string"
+        },
+        "auction_house": {
+          "pattern": "^0x[0-9a-fA-F]{40}$",
+          "title": "Auction House",
+          "type": "string"
+        },
+        "contract": {
+          "pattern": "^0x[0-9a-fA-F]{40}$",
+          "title": "Contract",
+          "type": "string"
+        },
+        "token_id": {
+          "pattern": "^[0-9]{1,78}$",
+          "title": "Token Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "auction_house",
+        "contract",
+        "token_id"
+      ],
+      "title": "TransientDelistErc721Action",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1,
+      "title": "Version",
+      "type": "integer"
+    },
+    "network": {
+      "const": "mainnet",
+      "title": "Network",
+      "type": "string"
+    },
+    "compromised": {
+      "pattern": "^0x[0-9a-fA-F]{40}$",
+      "title": "Compromised",
+      "type": "string"
+    },
+    "destination": {
+      "pattern": "^0x[0-9a-fA-F]{40}$",
+      "title": "Destination",
+      "type": "string"
+    },
+    "gas_wallet": {
+      "anyOf": [
+        {
+          "pattern": "^0x[0-9a-fA-F]{40}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Gas Wallet"
+    },
+    "options": {
+      "$ref": "#/$defs/Options"
+    },
+    "actions": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "cryptopunk": "#/$defs/CryptoPunkAction",
+            "custom": "#/$defs/CustomAction",
+            "erc1155": "#/$defs/Erc1155Action",
+            "erc20": "#/$defs/Erc20Action",
+            "erc721": "#/$defs/Erc721Action",
+            "ownership": "#/$defs/OwnershipAction",
+            "superrare_v1": "#/$defs/SuperRareV1Action",
+            "transient_delist_erc721": "#/$defs/TransientDelistErc721Action"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/Erc20Action"
+          },
+          {
+            "$ref": "#/$defs/Erc721Action"
+          },
+          {
+            "$ref": "#/$defs/Erc1155Action"
+          },
+          {
+            "$ref": "#/$defs/OwnershipAction"
+          },
+          {
+            "$ref": "#/$defs/TransientDelistErc721Action"
+          },
+          {
+            "$ref": "#/$defs/CryptoPunkAction"
+          },
+          {
+            "$ref": "#/$defs/SuperRareV1Action"
+          },
+          {
+            "$ref": "#/$defs/CustomAction"
+          }
+        ]
+      },
+      "minItems": 1,
+      "title": "Actions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "version",
+    "network",
+    "compromised",
+    "destination",
+    "actions"
+  ],
+  "title": "Plan",
+  "type": "object"
+}

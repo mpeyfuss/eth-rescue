@@ -2,6 +2,6 @@
 src = "src"
 out = "out"
 cache_path = "cache"
-solc = "0.8.30"
+solc = "0.8.38"
 evm_version = "osaka"
 

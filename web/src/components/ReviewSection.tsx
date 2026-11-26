@@ -1,3 +1,4 @@
+import type { Mode } from "../App";
 import { COMMANDS, PLAN_FILE, RUN_STEPS } from "../guide";
 import type { Issue } from "../plan/validate";
 import { CommandLine, CopyButton } from "./Command";
@@ -5,6 +6,8 @@ import { CommandLine, CopyButton } from "./Command";
 interface Props {
   plan: Record<string, unknown>;
   issues: Issue[];
+  revealed?: boolean;
+  mode?: Mode;
   onReveal: () => void;
 }
 
@@ -34,17 +37,20 @@ function download(json: string) {
   URL.revokeObjectURL(url);
 }
 
-export function ReviewSection({ plan, issues, onReveal }: Props) {
+export function ReviewSection({ plan, issues, revealed = false, mode = "emergency", onReveal }: Props) {
   const json = `${JSON.stringify(plan, null, 2)}\n`;
   const ready = issues.length === 0;
+  const preparing = mode === "prepare";
 
   return (
     <section className="card">
       <h2>4. Review and export</h2>
       {!ready && (
-        <div className="issues" role="status">
+        <div className={revealed ? "issues" : "issues checklist"} role="status">
           <p>
-            Fix {issues.length} {issues.length === 1 ? "problem" : "problems"} before exporting.{" "}
+            {revealed
+              ? `Fix ${issues.length} ${issues.length === 1 ? "problem" : "problems"} before exporting.`
+              : `Still needed before exporting (${issues.length}):`}{" "}
             <button type="button" className="link" onClick={onReveal}>
               Show them on the form
             </button>
@@ -68,12 +74,34 @@ export function ReviewSection({ plan, issues, onReveal }: Props) {
         </button>
         <CopyButton text={json} label="Copy JSON" disabled={!ready} />
       </div>
-      <h3>Then run</h3>
-      <p className="muted">
-        In a terminal, go to the folder where you saved {PLAN_FILE}. The CLI {RUN_STEPS}
-      </p>
-      <CommandLine command={COMMANDS.validate} />
-      <CommandLine command={COMMANDS.run} />
+      {preparing ? (
+        <>
+          <h3>Verify and store your break-glass plan</h3>
+          <p className="muted">
+            Because {PLAN_FILE} contains only public <code>0x…</code> addresses (no secrets), store a copy somewhere you
+            can reach from a fallback computer without turning on your main machine—such as a USB drive, cloud drive, or
+            an email to yourself. Check that your saved file is valid offline (this never asks for private keys):
+          </p>
+          <CommandLine command={COMMANDS.validate} />
+          <p className="muted">
+            Whenever you mint new NFTs or deploy new contracts, click <strong>Import plan.json</strong> at the top of
+            this page to re-scan and save an updated copy. If the wallet is ever compromised, run the rescue on a clean
+            computer from the folder where you saved {PLAN_FILE} (for example, <code>cd ~/Downloads</code>). The CLI{" "}
+            {RUN_STEPS}
+          </p>
+          <CommandLine command={COMMANDS.run} />
+        </>
+      ) : (
+        <>
+          <h3>Then run</h3>
+          <p className="muted">
+            In a terminal, go to the folder where you saved {PLAN_FILE} (for example, <code>cd ~/Downloads</code>). The
+            CLI {RUN_STEPS}
+          </p>
+          <CommandLine command={COMMANDS.validate} />
+          <CommandLine command={COMMANDS.run} />
+        </>
+      )}
     </section>
   );
 }
@@ -90,14 +118,23 @@ const ACTION_VERBS: Record<string, (action: Record<string, unknown>) => string> 
 function PlanSummary({ plan }: { plan: Record<string, unknown> }) {
   const actions = Array.isArray(plan.actions) ? (plan.actions as Record<string, unknown>[]) : [];
   const options = (plan.options ?? {}) as Record<string, unknown>;
+  const victim = String(plan.victim || "");
+  const safe = String(plan.safe || "");
   return (
     <div className="summary">
       <h3>What this plan does</h3>
       <ul>
         <li>
-          On <strong>{String(plan.network)}</strong>, moves assets out of <span className="mono">{String(plan.victim)}</span>{" "}
-          to the safe <span className="mono">{String(plan.safe)}</span>, which also receives all ETH left in the
-          compromised wallet.
+          On <strong>{String(plan.network)}</strong>, moves assets out of{" "}
+          {victim ? <span className="mono">{victim}</span> : "your compromised wallet"} to{" "}
+          {safe ? (
+            <>
+              the safe <span className="mono">{safe}</span>
+            </>
+          ) : (
+            "your safe wallet"
+          )}
+          , which also receives all ETH left in the compromised wallet.
         </li>
         <li>
           {plan.gas_wallet ? (
@@ -110,8 +147,8 @@ function PlanSummary({ plan }: { plan: Record<string, unknown> }) {
         </li>
         <li>
           {options.legacy_fallback === false
-            ? "Actions that have no effect are reported, not retried."
-            : "Actions that have no effect are retried once as direct transactions, without asking again."}
+            ? "Actions that fail in the bundle are reported, not retried."
+            : "Actions that fail in the bundle are retried once as direct transactions, without asking again."}
         </li>
       </ul>
       <ol>

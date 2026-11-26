@@ -39,6 +39,7 @@ afterEach(cleanup);
 test("scan results can be added to the plan once", async () => {
   const user = userEvent.setup();
   render(<App scan={scanWallet} />);
+  await user.click(screen.getByRole("button", { name: /My wallet is compromised/i }));
   const scan = screen.getByRole("button", { name: "Scan wallet" });
   expect(scan).toHaveProperty("disabled", true);
 
@@ -68,6 +69,7 @@ test("a scan that finishes after the wallet changed is ignored", async () => {
       }),
   );
   render(<App scan={slowScan} />);
+  await user.click(screen.getByRole("button", { name: /My wallet is compromised/i }));
   const victim = screen.getByLabelText("Compromised wallet");
   await user.click(victim);
   await user.paste(VICTIM);
@@ -86,6 +88,7 @@ test("a scan that throws can be retried", async () => {
     throw new Error("chunk failed to load");
   });
   render(<App scan={failing} />);
+  await user.click(screen.getByRole("button", { name: /My wallet is compromised/i }));
   await user.click(screen.getByLabelText("Compromised wallet"));
   await user.paste(VICTIM);
   await user.click(screen.getByRole("button", { name: "Scan wallet" }));

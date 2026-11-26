@@ -96,8 +96,9 @@ export function ActionsSection({ draft, dispatch, errorFor }: Props) {
     <section className="card">
       <h2>3. Assets to rescue</h2>
       <p className="muted">
-        Actions run in this order. Typed actions send to the safe wallet; a custom call does exactly what its target
-        and arguments say, so check where it sends anything.
+        Actions run in this order. Every item below goes to your safe wallet (except custom calls, which use the exact
+        arguments you provide). Any ETH left in the compromised wallet is swept to your safe wallet automatically at
+        the end.
       </p>
       {actions.length === 0 && <p className="empty">No actions yet.</p>}
       <DndContext

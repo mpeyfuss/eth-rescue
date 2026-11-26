@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 
-from eth_abi import encode as abi_encode
+from eth_abi import decode as abi_decode, encode as abi_encode
 from eth_account import Account
-from eth_utils import keccak
+from eth_utils import keccak, to_hex
 from web3 import Web3
 
 from eth_rescue.types import PreparedAction
@@ -11,6 +11,11 @@ REQUEST_TYPE = "(address,address,uint256,bytes32)"
 ACTIONS_TYPE = "(address,uint256,bytes)[]"
 RESCUE_SELECTOR = keccak(text=f"rescue({REQUEST_TYPE},{ACTIONS_TYPE},bytes)")[:4]
 ACTION_RESULT_TOPIC = keccak(text="ActionResult(uint256,bool)")
+RESCUE_REQUEST_TYPEHASH = keccak(
+    text="RescueRequest(address rescuer,address safe,uint256 deadline,bytes32 actionsHash)"
+)
+TYPEHASH_SELECTOR = keccak(text="RESCUE_REQUEST_TYPEHASH()")[:4]
+DELEGATION_DESIGNATOR_PREFIX = b"\xef\x01\x00"
 
 EIP712_DOMAIN_NAME = "EthRescue"
 EIP712_DOMAIN_VERSION = "1"
@@ -39,9 +44,42 @@ class RescueRequest:
         return (self.rescuer, self.safe, self.deadline, self.actions_hash)
 
 
-def require_rescue_contract(w3: Web3, address: str) -> None:
-    if not w3.eth.get_code(address):
+def runtime_codehash(code: bytes) -> str:
+    return to_hex(keccak(code))
+
+
+def require_rescue_contract(
+    w3: Web3, address: str, codehash: str | None = None
+) -> None:
+    """Refuse to sign a delegation to anything but the reviewed EthRescue build.
+
+    `codehash` is the keccak of the deployment's runtime code (it includes the
+    EIP-712 immutables, so it is specific to one deployment). Without a pin, as
+    in local tests, the contract must at least answer like EthRescue.
+    """
+    code = bytes(w3.eth.get_code(address))
+    if not code:
         raise RescueContractError(f"No EthRescue contract is deployed at {address}")
+    if code.startswith(DELEGATION_DESIGNATOR_PREFIX):
+        raise RescueContractError(f"{address} is a delegated account, not EthRescue")
+    if codehash is not None:
+        if runtime_codehash(code).lower() != codehash.lower():
+            raise RescueContractError(
+                f"The contract at {address} is not the expected EthRescue build"
+            )
+        return
+    try:
+        typehash = bytes(
+            w3.eth.call({"to": address, "data": to_hex(TYPEHASH_SELECTOR)})
+        )
+    except Exception as e:
+        raise RescueContractError(f"The contract at {address} is not EthRescue") from e
+    if typehash != RESCUE_REQUEST_TYPEHASH:
+        raise RescueContractError(f"The contract at {address} is not EthRescue")
+
+
+def decode_rescue_results(data: bytes) -> list[bool]:
+    return list(abi_decode(["bool[]"], data)[0])
 
 
 def _abi_actions(prepared: list[PreparedAction]) -> list[tuple[str, int, bytes]]:

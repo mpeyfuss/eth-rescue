@@ -1,6 +1,8 @@
 import argparse
 import getpass
+import math
 import sys
+import warnings
 from decimal import Decimal, InvalidOperation
 
 from eth_account import Account
@@ -19,6 +21,9 @@ from eth_rescue.plan import Plan, PlanError, expand, load_plan, render_schema
 from eth_rescue.report import JsonReporter, Reporter, RichReporter
 
 INTERRUPTED = 130
+INTERRUPTED_MESSAGE = (
+    "Interrupted. A bundle that was already submitted may still be included."
+)
 
 
 class CliError(Exception):
@@ -71,8 +76,32 @@ def gas_multiplier(value: str) -> Decimal:
     return multiplier
 
 
+def funding_timeout(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"not a number: {value!r}") from e
+    if not math.isfinite(seconds) or seconds < 0:
+        raise argparse.ArgumentTypeError("must be a finite number of seconds >= 0")
+    return seconds
+
+
+def _hidden_input(prompt: str) -> str:
+    """getpass that refuses to fall back to echoing the key."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", getpass.GetPassWarning)
+        try:
+            return getpass.getpass(prompt)
+        except getpass.GetPassWarning as e:
+            raise CliError(
+                "this terminal cannot hide typed input; run in a regular terminal"
+            ) from e
+        except EOFError as e:
+            raise CliError("no private key was entered") from e
+
+
 def _read_key(label: str) -> LocalAccount:
-    raw = getpass.getpass(f"{label} private key (hidden): ").strip()
+    raw = _hidden_input(f"{label} private key (hidden): ").strip()
     try:
         return Account.from_key(raw)
     except ValueError as e:
@@ -104,7 +133,10 @@ def _confirm() -> bool:
         return False
     sys.stderr.write("Send the rescue bundle now? [y/N] ")
     sys.stderr.flush()
-    return input().strip().lower() in {"y", "yes"}
+    try:
+        return input().strip().lower() in {"y", "yes"}
+    except EOFError:
+        return False
 
 
 def _context(
@@ -112,7 +144,7 @@ def _context(
 ) -> tuple[Plan, RescueContext]:
     plan = load_plan(args.plan)
     network = NETWORKS[plan.network]
-    if network["eth_rescue"] is None:
+    if network["eth_rescue"] is None or network["eth_rescue_codehash"] is None:
         raise CliError(f"EthRescue is not deployed on {network['label']} yet")
     w3 = connect(network, Account.create(), rpc=args.rpc)
     reporter.message("info", f"Connected to {network['label']}.")
@@ -124,6 +156,8 @@ def _context(
         safe=plan.safe,
         reporter=reporter,
         rescue_contract=network["eth_rescue"],
+        rescue_codehash=network["eth_rescue_codehash"],
+        network=network["label"],
         extra_priority_fee_gwei=Decimal(plan.options.priority_fee_gwei),
         gas_multiplier=args.gas_multiplier,
         max_blocks=plan.options.max_blocks,
@@ -140,14 +174,18 @@ def _rescue(args: argparse.Namespace) -> int:
         return ExitCode.INVALID
 
     rescue_data = expand(plan)
-    if args.command == "simulate":
-        return engine.simulate(ctx, rescue_data)
-    return engine.run(
-        ctx,
-        rescue_data,
-        confirm=(lambda: True) if args.yes else _confirm,
-        legacy_fallback=plan.options.legacy_fallback,
-    )
+    try:
+        if args.command == "simulate":
+            return engine.simulate(ctx, rescue_data, plan.options.legacy_fallback)
+        return engine.run(
+            ctx,
+            rescue_data,
+            confirm=(lambda: True) if args.yes else _confirm,
+            legacy_fallback=plan.options.legacy_fallback,
+        )
+    except KeyboardInterrupt:
+        reporter.message("warning", INTERRUPTED_MESSAGE)
+        return INTERRUPTED
 
 
 def _add_rescue_arguments(parser: argparse.ArgumentParser) -> None:
@@ -158,7 +196,7 @@ def _add_rescue_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--funding-timeout",
-        type=float,
+        type=funding_timeout,
         default=engine.DEFAULT_FUNDING_TIMEOUT,
         metavar="SECONDS",
         help="how long to wait for the gas wallet to be funded (default: 1800)",
@@ -217,9 +255,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return int(args.handler(args))
     except KeyboardInterrupt:
-        ui.warning(
-            "Interrupted. A bundle that was already submitted may still be included."
-        )
+        # Outside a rescue (e.g. at a key prompt); --json output stays NDJSON.
+        if getattr(args, "json", False):
+            JsonReporter().message("warning", INTERRUPTED_MESSAGE)
+        else:
+            ui.warning(INTERRUPTED_MESSAGE)
         return INTERRUPTED
 
 

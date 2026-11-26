@@ -1,7 +1,11 @@
+import re
+from typing import Any
+
 from rich import box
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
-
+from rich.text import Text
 from web3 import Web3
 
 from eth_rescue.types import (
@@ -13,25 +17,51 @@ from eth_rescue.types import (
 
 console = Console()
 
+# 65 bytes or more of hex is a signature, a signed transaction or raw calldata:
+# never useful in a message, and possibly sensitive.
+LONG_HEX_RE = re.compile(r"0x[0-9a-fA-F]{130,}")
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+MAX_MESSAGE_LENGTH = 2_000
+
+
+def plain(text: Any) -> str:
+    """Untrusted text (labels, provider and relay errors) made safe to print:
+    no terminal control sequences, no long hex blobs, bounded length."""
+    cleaned = CONTROL_RE.sub("", str(text))
+    cleaned = LONG_HEX_RE.sub(
+        lambda m: f"0x…({(len(m.group()) - 2) // 2} bytes hidden)", cleaned
+    )
+    if len(cleaned) > MAX_MESSAGE_LENGTH:
+        cleaned = cleaned[:MAX_MESSAGE_LENGTH] + "…"
+    return cleaned
+
+
+def _literal(text: Any) -> Text:
+    return Text(plain(text))
+
 
 def section(text: str) -> None:
-    console.print(f"\n[bold cyan]{text}[/bold cyan]")
+    console.print(f"\n[bold cyan]{escape(plain(text))}[/bold cyan]")
 
 
 def info(message: str) -> None:
-    console.print(f"[cyan]INFO[/cyan] {message}")
+    console.print(f"[cyan]INFO[/cyan] {escape(plain(message))}")
 
 
 def success(message: str) -> None:
-    console.print(f"[green]OK[/green] {message}")
+    console.print(f"[green]OK[/green] {escape(plain(message))}")
 
 
 def warning(message: str) -> None:
-    console.print(f"[yellow]WARN[/yellow] {message}")
+    console.print(f"[yellow]WARN[/yellow] {escape(plain(message))}")
 
 
 def error(message: str) -> None:
-    console.print(f"[red]ERROR[/red] {message}")
+    console.print(f"[red]ERROR[/red] {escape(plain(message))}")
+
+
+def describe_call(action: RescueData) -> str:
+    return f"{action['function_signature']} {action['args']}"
 
 
 def render_rescue_plan(actions: list[RescueData]) -> None:
@@ -45,9 +75,9 @@ def render_rescue_plan(actions: list[RescueData]) -> None:
         desc = action.get("description") or action["function_signature"]
         table.add_row(
             str(i),
-            desc,
-            action["address"],
-            f"{action['function_signature']} {action['args']}",
+            _literal(desc),
+            _literal(action["address"]),
+            _literal(describe_call(action)),
         )
 
     console.print()
@@ -80,9 +110,9 @@ def render_simulation_result(result: SimulationResult) -> None:
         error_text = tx_result.get("error") or tx_result.get("revert") or ""
         table.add_row(
             str(i),
-            str(tx_result.get("txHash", "")),
+            _literal(tx_result.get("txHash", "")),
             f"{int(tx_result.get('gasUsed', 0)):,}",
-            error_text or "OK",
+            _literal(error_text or "OK"),
         )
 
     table.add_section()
@@ -90,36 +120,61 @@ def render_simulation_result(result: SimulationResult) -> None:
         "",
         "Total gas used",
         f"{int(result.get('totalGasUsed', 0)):,}",
-        f"Bundle hash: {result.get('bundleHash', '')}",
+        _literal(f"Bundle hash: {result.get('bundleHash', '')}"),
     )
     console.print(table)
+
+
+STATUS_STYLES = {
+    "rescued": "green",
+    "partial": "yellow",
+    "unverified": "yellow",
+    "failed": "red",
+    "not_executed": "red",
+}
+STATUS_LABELS = {"not_executed": "not executed"}
 
 
 def render_outcome_report(
     actions: list[RescueData], outcomes: list[ActionOutcome]
 ) -> None:
-    styles = {
-        "rescued": "[green]rescued[/green]",
-        "failed": "[red]failed[/red]",
-        "unverified": "[yellow]unverified[/yellow]",
-    }
     table = Table(title="Rescue outcome", box=box.ASCII, show_lines=True)
     table.add_column("#", justify="right", style="bold")
     table.add_column("Action", overflow="fold")
     table.add_column("Result")
+    table.add_column("Detail", overflow="fold")
 
     for outcome in outcomes:
         action = actions[outcome.index]
         desc = action.get("description") or action["function_signature"]
+        label = STATUS_LABELS.get(outcome.status, outcome.status)
         table.add_row(
-            str(outcome.index + 1), desc, styles.get(outcome.status, outcome.status)
+            str(outcome.index + 1),
+            _literal(desc),
+            Text(label, style=STATUS_STYLES.get(outcome.status, "")),
+            _literal(outcome.detail or ""),
         )
 
     console.print()
     console.print(table)
     if any(o.status == "unverified" for o in outcomes):
         warning(
-            "Unverified actions could not be checked automatically; confirm them "
-            "manually. They are not retried in the legacy fallback."
+            "Unverified actions ran but could not be checked automatically; confirm "
+            "them manually. They are never retried automatically."
+        )
+    if any(o.status == "partial" for o in outcomes):
+        warning(
+            "Partially delivered actions are not retried automatically, so the "
+            "remainder is not sent twice. Check the balances and rerun if needed."
         )
     console.print()
+
+
+def render_final_state(victim_balance: int, delegation: str | None) -> None:
+    info(
+        f"ETH left in the compromised wallet: {Web3.from_wei(victim_balance, 'ether')}"
+    )
+    if delegation is None:
+        info("The compromised wallet has no EIP-7702 delegation.")
+    else:
+        warning(f"The compromised wallet is delegated to {delegation}.")

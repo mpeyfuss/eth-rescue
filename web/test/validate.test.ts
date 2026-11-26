@@ -32,11 +32,11 @@ test("bad checksum is rejected", () => {
 });
 
 test("safe must differ from victim", () => {
-  expect(paths(plan({ safe: VICTIM.toLowerCase() }))).toEqual(["safe: must differ from victim"]);
+  expect(paths(plan({ safe: VICTIM.toLowerCase() }))).toEqual(["safe: must differ from the compromised wallet"]);
 });
 
 test("gas wallet must differ from victim and safe", () => {
-  expect(paths(plan({ gas_wallet: SAFE }))).toEqual(["gas_wallet: must differ from victim and safe"]);
+  expect(paths(plan({ gas_wallet: SAFE }))).toEqual(["gas_wallet: must differ from the compromised wallet and safe wallet"]);
 });
 
 test("missing fields and empty actions", () => {

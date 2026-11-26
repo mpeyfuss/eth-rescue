@@ -4,15 +4,17 @@ import shutil
 import socket
 import subprocess
 import time
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
+from eth_utils import keccak
+from hexbytes import HexBytes
 from web3 import HTTPProvider, Web3
+from web3.exceptions import TransactionNotFound
 from web3.types import TxReceipt
 
 from eth_rescue.engine import RescueContext
@@ -50,6 +52,11 @@ def anvil_w3() -> Iterator[Web3]:
             "--chain-id",
             "31337",
             "--enable-tx-gas-limit",
+            "--order",
+            "fifo",
+            # Bundles fund the victim mid-block; balances are still enforced
+            # when the block executes, as a builder would.
+            "--disable-pool-balance-checks",
             "--quiet",
         ],
         stdout=subprocess.PIPE,
@@ -91,45 +98,59 @@ def anvil_w3() -> Iterator[Web3]:
             process.wait(timeout=5)
 
 
-@dataclass(frozen=True)
-class SequentialSubmission:
-    transaction_receipts: tuple[TxReceipt, ...]
+class BlockRelay:
+    """Anvil relay double with Flashbots semantics: a bundle lands atomically, in
+    order, in its target block, or not at all. Blocks are mined only when the
+    engine sleeps (see `make_ctx`), so the engine's block-by-block polling runs
+    for real. `allow_reverts` lands bundles with failed transactions (status 0);
+    `front_run` runs once, mined in the block before the next landing attempt.
 
-    def wait(self) -> None:
-        return None
-
-    def receipts(self) -> list[TxReceipt]:
-        return list(self.transaction_receipts)
-
-
-class SequentialRelay:
-    """Anvil relay double; sequential execution does not model bundle atomicity."""
+    Bundle blocks are built with `anvil_reorg`, which executes a given
+    transaction list as one block. The mempool cannot do this: it holds back a
+    victim transaction whose nonce an earlier authorization in the same block
+    bumps.
+    """
 
     def __init__(self, w3: Web3):
         self.w3 = w3
         self.simulated: list[list[BundleEntry]] = []
-        self.sent: list[list[BundleEntry]] = []
-        self.submitted_receipts: list[list[TxReceipt]] = []
+        self.sent: list[tuple[list[BundleEntry], int]] = []
+        self.landed: list[list[TxReceipt]] = []
+        self.lands: Callable[[list[BundleEntry], int], bool] = lambda b, n: True
+        self.allow_reverts = False
+        self.front_run: Callable[[], None] | None = None
 
-    def _execute(
+    def _rpc(self, method: str, params: list | None = None) -> Any:
+        response = self.w3.provider.make_request(method, params or [])
+        if "error" in response:
+            raise RuntimeError(f"{method} failed: {response['error']}")
+        return response["result"]
+
+    def _mine_with(
         self, bundle: list[BundleEntry]
     ) -> tuple[list[dict[str, Any]], list[TxReceipt]]:
-        results: list[dict[str, Any]] = []
+        """Mine `bundle` alone as the next block; per-transaction results."""
+        raw = [HexBytes(entry["signed_transaction"]) for entry in bundle]
+        hashes = [HexBytes(keccak(tx)) for tx in raw]
+        results: list[dict[str, Any]] = [{"txHash": h.to_0x_hex()} for h in hashes]
+        self._rpc("evm_mine")
+        if not raw:
+            return results, []
+        try:
+            self._rpc("anvil_reorg", [1, [[tx.to_0x_hex(), 0] for tx in raw]])
+        except RuntimeError as error:
+            return [{"error": str(error)} for _ in raw], []
         receipts: list[TxReceipt] = []
-        for entry in bundle:
+        for tx_hash, result in zip(hashes, results):
             try:
-                tx_hash = self.w3.eth.send_raw_transaction(entry["signed_transaction"])
-                receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
-                receipts.append(receipt)
-                result: dict[str, Any] = {
-                    "txHash": tx_hash.hex(),
-                    "gasUsed": receipt["gasUsed"],
-                }
-                if receipt["status"] != 1:
-                    result["revert"] = "transaction reverted"
-                results.append(result)
-            except Exception as error:
-                results.append({"error": str(error)})
+                receipt = self.w3.eth.get_transaction_receipt(tx_hash)
+            except TransactionNotFound:
+                result["error"] = "transaction was not mined"
+                continue
+            receipts.append(receipt)
+            result["gasUsed"] = receipt["gasUsed"]
+            if receipt["status"] != 1:
+                result["revert"] = "transaction reverted"
         return results, receipts
 
     def simulate(
@@ -137,27 +158,45 @@ class SequentialRelay:
     ) -> SimulationResult:
         del block_tag
         self.simulated.append(bundle)
-        snapshot = self.w3.provider.make_request("evm_snapshot", [])["result"]
+        snapshot = self._rpc("evm_snapshot")
         try:
-            results, _ = self._execute(bundle)
-            return {
-                "bundleHash": "0xsequential-simulation",
-                "results": results,
-                "totalGasUsed": sum(result.get("gasUsed", 0) for result in results),
-            }
+            results, _receipts = self._mine_with(bundle)
         finally:
-            reverted = self.w3.provider.make_request("evm_revert", [snapshot])["result"]
-            if not reverted:
+            if not self._rpc("evm_revert", [snapshot]):
                 raise RuntimeError("Anvil failed to revert relay simulation snapshot")
+        return {
+            "bundleHash": "0xsimulation",
+            "results": results,
+            "totalGasUsed": sum(result.get("gasUsed", 0) for result in results),
+        }
 
-    def send_bundle(
-        self, bundle: list[BundleEntry], target_block_number: int
-    ) -> SequentialSubmission:
-        del target_block_number
-        self.sent.append(bundle)
-        _results, receipts = self._execute(bundle)
-        self.submitted_receipts.append(receipts)
-        return SequentialSubmission(tuple(receipts))
+    def send_bundle(self, bundle: list[BundleEntry], target_block_number: int) -> None:
+        self.sent.append((bundle, target_block_number))
+
+    def _try_land(self, bundle: list[BundleEntry]) -> bool:
+        snapshot = self._rpc("evm_snapshot")
+        results, receipts = self._mine_with(bundle)
+        failed = any(
+            "error" in result or ("revert" in result and not self.allow_reverts)
+            for result in results
+        )
+        if failed:
+            self._rpc("evm_revert", [snapshot])
+            return False
+        self.landed.append(receipts)
+        return True
+
+    def mine_block(self) -> None:
+        if self.front_run is not None:
+            front_run, self.front_run = self.front_run, None
+            front_run()  # automine: lands in its own block
+            return
+        number = self.w3.eth.block_number + 1
+        for bundle, target in self.sent:
+            if target == number and self.lands(bundle, number):
+                if self._try_land(bundle):
+                    return
+        self._rpc("evm_mine")
 
 
 def _artifact(name: str, out: Path = CONTRACT_OUT) -> tuple[list[dict[str, Any]], str]:
@@ -195,8 +234,8 @@ def rescue_accounts(anvil_w3: Web3) -> tuple[LocalAccount, LocalAccount, LocalAc
 
 
 @pytest.fixture
-def sequential_relay(anvil_w3: Web3) -> SequentialRelay:
-    relay = SequentialRelay(anvil_w3)
+def relay(anvil_w3: Web3) -> BlockRelay:
+    relay = BlockRelay(anvil_w3)
     anvil_w3.relay = relay
     return relay
 
@@ -260,8 +299,9 @@ def rescue_contract(anvil_w3: Web3):
 
 
 @pytest.fixture
-def make_ctx(anvil_w3: Web3, reporter, rescue_contract):
-    """Build a RescueContext that never sleeps; extra fields override defaults."""
+def make_ctx(anvil_w3: Web3, reporter, rescue_contract, relay):
+    """Build a RescueContext whose every sleep mines one block through the relay;
+    extra fields override defaults."""
 
     def make(victim, gas, safe, **overrides) -> RescueContext:
         fields = {
@@ -273,7 +313,7 @@ def make_ctx(anvil_w3: Web3, reporter, rescue_contract):
             "rescue_contract": rescue_contract.address,
             "poll_interval": 0,
             "funding_timeout": 0,
-            "sleep": lambda seconds: None,
+            "sleep": lambda seconds: relay.mine_block(),
         }
         return RescueContext(**(fields | overrides))
 
@@ -283,3 +323,14 @@ def make_ctx(anvil_w3: Web3, reporter, rescue_contract):
 @pytest.fixture
 def gas_burner(anvil_w3: Web3):
     return _deploy(anvil_w3, "FixtureGasBurner")
+
+
+@pytest.fixture
+def receiver(anvil_w3: Web3):
+    """A contract safe whose receive() needs more than the 2,300-gas stipend."""
+    return _deploy(anvil_w3, "FixtureReceiver")
+
+
+@pytest.fixture
+def switch(anvil_w3: Web3):
+    return _deploy(anvil_w3, "FixtureSwitch")

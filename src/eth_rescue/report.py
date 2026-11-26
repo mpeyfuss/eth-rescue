@@ -24,11 +24,23 @@ class Reporter(Protocol):
     def outcomes(
         self, actions: list[RescueData], outcomes: list[ActionOutcome]
     ) -> None: ...
+    def final_state(self, victim_balance: int, delegation: str | None) -> None: ...
     def waiting(self, text: str) -> AbstractContextManager[Any]: ...
 
 
 def _ether(wei: int) -> str:
     return f"{Web3.from_wei(wei, 'ether')} ETH"
+
+
+def _json_safe(value: Any) -> Any:
+    """Integers become decimal strings so JS consumers keep full precision."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 class RichReporter:
@@ -63,12 +75,16 @@ class RichReporter:
     def included(self, receipts: list[TxReceipt]) -> None:
         ui.success(f"Bundle included in block {receipts[0]['blockNumber']}.")
         for receipt in receipts:
-            ui.info(f"  {receipt['transactionHash'].to_0x_hex()}")
+            status = "" if receipt["status"] == 1 else " (reverted)"
+            ui.info(f"  {receipt['transactionHash'].to_0x_hex()}{status}")
 
     def outcomes(
         self, actions: list[RescueData], outcomes: list[ActionOutcome]
     ) -> None:
         ui.render_outcome_report(actions, outcomes)
+
+    def final_state(self, victim_balance: int, delegation: str | None) -> None:
+        ui.render_final_state(victim_balance, delegation)
 
     def waiting(self, text: str) -> AbstractContextManager[Any]:
         return ui.console.status(text)
@@ -85,7 +101,7 @@ class JsonReporter:
         self.stream.flush()
 
     def message(self, level: Level, text: str) -> None:
-        self._emit("message", level=level, text=text)
+        self._emit("message", level=level, text=ui.plain(text))
 
     def phase(self, title: str) -> None:
         self._emit("phase", title=title)
@@ -95,11 +111,15 @@ class JsonReporter:
             "plan",
             actions=[
                 {
+                    "index": index,
+                    "action": action.get("plan_action"),
+                    "step": action.get("plan_step"),
                     "target": action["address"],
                     "signature": action["function_signature"],
+                    "args": _json_safe(action["args"]),
                     "description": action.get("description"),
                 }
-                for action in actions
+                for index, action in enumerate(actions)
             ],
         )
 
@@ -132,6 +152,7 @@ class JsonReporter:
             "included",
             block=receipts[0]["blockNumber"],
             transactions=[r["transactionHash"].to_0x_hex() for r in receipts],
+            statuses=[r["status"] for r in receipts],
         )
 
     def outcomes(
@@ -142,11 +163,21 @@ class JsonReporter:
             outcomes=[
                 {
                     "index": outcome.index,
+                    "action": actions[outcome.index].get("plan_action"),
+                    "step": actions[outcome.index].get("plan_step"),
                     "status": outcome.status,
+                    "detail": outcome.detail,
                     "description": actions[outcome.index].get("description"),
                 }
                 for outcome in outcomes
             ],
+        )
+
+    def final_state(self, victim_balance: int, delegation: str | None) -> None:
+        self._emit(
+            "final_state",
+            victim_balance=str(victim_balance),
+            victim_delegation=delegation,
         )
 
     def waiting(self, text: str) -> AbstractContextManager[Any]:

@@ -21,6 +21,12 @@ def erc20_transfer(contract: str, to: str, amount: int) -> RescueData:
         "args": [to, amount],
         "gas_estimate": GAS_ERC20,
         "description": f"ERC20 transfer of {amount} (base units) to {to}",
+        "check": {
+            "kind": "erc20",
+            "contract": contract,
+            "recipient": to,
+            "amount": amount,
+        },
     }
 
 
@@ -34,6 +40,12 @@ def erc721_transfer(
         "args": [from_victim, to, token_id],
         "gas_estimate": GAS_ERC721,
         "description": f"ERC721 token #{token_id} -> {to}",
+        "check": {
+            "kind": "erc721",
+            "contract": contract,
+            "recipient": to,
+            "token_id": token_id,
+        },
     }
 
 
@@ -64,9 +76,16 @@ def erc1155_transfer(
     return {
         "address": contract,
         "function_signature": "safeTransferFrom(address,address,uint256,uint256,bytes)",
-        "args": [from_victim, to, token_id, amount, b""],
+        "args": [from_victim, to, token_id, amount, "0x"],
         "gas_estimate": GAS_ERC1155,
         "description": f"ERC1155 token #{token_id} x{amount} -> {to}",
+        "check": {
+            "kind": "erc1155",
+            "contract": contract,
+            "recipient": to,
+            "token_id": token_id,
+            "amount": amount,
+        },
     }
 
 
@@ -78,17 +97,20 @@ def transfer_ownership(contract: str, to: str) -> RescueData:
         "args": [to],
         "gas_estimate": GAS_OWNERSHIP,
         "description": f"transferOwnership of {contract} -> {to}",
+        "check": {"kind": "ownership", "contract": contract, "recipient": to},
     }
 
 
 def custom(
     contract: str, function_signature: str, args: list, gas_estimate: int = GAS_GENERIC
 ) -> RescueData:
-    """Generic action: any function signature + args (power-user escape hatch)."""
+    """Generic action: any function signature + args (power-user escape hatch).
+    It has no check: its effect is only known from its call result."""
     return {
         "address": contract,
         "function_signature": function_signature,
         "args": args,
         "gas_estimate": gas_estimate,
         "description": f"custom {function_signature} on {contract}",
+        "custom": True,
     }

@@ -132,9 +132,9 @@ function walletIssues(plan: Record<string, unknown>, flagged: Issue[]): Issue[] 
   }
   if (issues.length > 0 || flagged.some((issue) => PLAN_ADDRESS_FIELDS.includes(issue.path))) return issues;
   const { victim, safe, gas_wallet } = plan as Pick<Plan, "victim" | "safe" | "gas_wallet">;
-  if (sameAddress(safe, victim)) issues.push({ path: "safe", message: "must differ from victim" });
+  if (sameAddress(safe, victim)) issues.push({ path: "safe", message: "must differ from the compromised wallet" });
   if (gas_wallet && (sameAddress(gas_wallet, victim) || sameAddress(gas_wallet, safe))) {
-    issues.push({ path: "gas_wallet", message: "must differ from victim and safe" });
+    issues.push({ path: "gas_wallet", message: "must differ from the compromised wallet and safe wallet" });
   }
   return issues;
 }

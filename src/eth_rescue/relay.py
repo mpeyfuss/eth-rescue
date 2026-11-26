@@ -1,5 +1,4 @@
 import json
-import time
 from dataclasses import dataclass
 from typing import Any, NotRequired, TypedDict
 
@@ -8,7 +7,6 @@ from eth_account import Account, messages
 from eth_account.signers.local import LocalAccount
 from hexbytes import HexBytes
 from web3 import Web3
-from web3.types import TxReceipt
 
 from eth_rescue.types import (
     BundleEntry,
@@ -18,7 +16,7 @@ from eth_rescue.types import (
 )
 
 SECONDS_PER_BLOCK = 12
-MAX_ERROR_BODY_LENGTH = 1_000
+MAX_ERROR_LENGTH = 300
 
 BUILDERS = [
     "flashbots",
@@ -47,6 +45,10 @@ class RelayError(RuntimeError):
     pass
 
 
+class RelayTimeout(RelayError):
+    """The request may or may not have reached the relay."""
+
+
 class RelayRPCError(RelayError):
     def __init__(self, code: int | None, message: str):
         self.code = code
@@ -55,21 +57,20 @@ class RelayRPCError(RelayError):
 
 @dataclass(frozen=True)
 class BundleSubmission:
-    w3: Web3
     transaction_hashes: tuple[HexBytes, ...]
     target_block_number: int
     bundle_hash: str
 
-    def wait(self) -> None:
-        while self.w3.eth.block_number < self.target_block_number:
-            time.sleep(1)
 
-    def receipts(self) -> list[TxReceipt]:
-        self.wait()
-        return [
-            self.w3.eth.get_transaction_receipt(transaction_hash)
-            for transaction_hash in self.transaction_hashes
-        ]
+def _error_message(response: requests.Response) -> str:
+    """Only the relay's JSON-RPC error message: response bodies can echo the
+    submitted request, which holds signed transactions."""
+    try:
+        payload = response.json()
+        message = payload["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        return ""
+    return str(message)[:MAX_ERROR_LENGTH]
 
 
 class RelayClient:
@@ -119,26 +120,28 @@ class RelayClient:
                 },
                 timeout=self.timeout,
             )
+        except requests.Timeout as e:
+            raise RelayTimeout("Relay request timed out") from e
         except requests.RequestException as e:
-            raise RelayError(f"Relay request failed: {e}") from e
+            raise RelayError(f"Relay request failed: {type(e).__name__}") from e
 
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as e:
-            detail = " ".join(response.text.split())
-            if len(detail) > MAX_ERROR_BODY_LENGTH:
-                detail = f"{detail[:MAX_ERROR_BODY_LENGTH]}..."
-            suffix = f" Response: {detail}" if detail else ""
-            raise RelayError(f"Relay request failed: {e}.{suffix}") from e
+        if not response.ok:
+            detail = _error_message(response)
+            suffix = f": {detail}" if detail else ""
+            raise RelayError(
+                f"Relay request failed with HTTP {response.status_code}{suffix}"
+            )
 
         try:
             payload: RPCResponse[Any] = response.json()
         except ValueError as e:
-            raise RelayError(f"Relay request failed: {e}") from e
+            raise RelayError("Relay response was not JSON") from e
 
         if "error" in payload:
             error = payload["error"]
-            raise RelayRPCError(error.get("code"), error["message"])
+            raise RelayRPCError(
+                error.get("code"), str(error.get("message", ""))[:MAX_ERROR_LENGTH]
+            )
 
         if "result" not in payload:
             raise RelayError("Relay response did not include a result")
@@ -201,7 +204,6 @@ class RelayClient:
             params["builders"] = self.builders
         result: SendBundleResult = self._request("eth_sendBundle", [params])
         return BundleSubmission(
-            self.w3,
             tuple(self.w3.keccak(tx) for tx in raw_transactions),
             target_block_number,
             result["bundleHash"],

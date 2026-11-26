@@ -5,7 +5,7 @@ export type Os = "macos" | "linux" | "windows";
 export const CLI_VERSION = "1.0.0";
 export const CLI = `uvx eth-rescue@${CLI_VERSION}`;
 export const RUN_STEPS =
-  "asks for the private keys in a hidden prompt, shows what the plan will do, waits until the gas wallet holds enough ETH (it tells you how much), simulates the rescue, and asks once before sending. If anything has no effect, it retries those actions with a direct fallback without asking again.";
+  "asks for both private keys in a hidden prompt (nothing appears on screen as you type or paste—paste once and press Enter), shows what the plan will do, waits until the gas wallet holds enough ETH (it tells you how much), simulates the rescue, and asks once before sending. If any action fails in the bundle, it automatically retries it as a direct transaction without asking again.";
 export const PLAN_FILE = "plan.json";
 
 export const COMMANDS = {
@@ -61,7 +61,7 @@ Use only these steps and commands:
    ${COMMANDS.check}
 4. Optional: create a fresh gas wallet to pay for the rescue. It prints a new address and private key once:
    ${COMMANDS.gasWallet}
-5. Go to the folder that contains ${PLAN_FILE}, then run:
+5. Go to the folder where I saved ${PLAN_FILE} (for example, cd ~/Downloads), then run:
    ${COMMANDS.validate}
    Optionally rehearse without sending anything (it asks for the keys too):
    ${COMMANDS.simulate}

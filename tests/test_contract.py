@@ -97,14 +97,71 @@ def test_encode_rescue_call_round_trips():
     assert decoded_signature == signature
 
 
-def test_require_rescue_contract_accepts_deployed_code():
-    w3 = SimpleNamespace(eth=SimpleNamespace(get_code=lambda address: b"\x60\x00"))
+def _code_chain(code, typehash=contract.RESCUE_REQUEST_TYPEHASH):
+    def call(transaction):
+        assert transaction["data"] == "0x" + contract.TYPEHASH_SELECTOR.hex()
+        if isinstance(typehash, Exception):
+            raise typehash
+        return typehash
 
-    contract.require_rescue_contract(w3, "0x" + "55" * 20)
+    return SimpleNamespace(
+        eth=SimpleNamespace(get_code=lambda address: code, call=call)
+    )
+
+
+RUNTIME = b"\x60\x80\x60\x40"
+ADDRESS = "0x" + "55" * 20
+
+
+def test_require_rescue_contract_accepts_pinned_codehash():
+    contract.require_rescue_contract(
+        _code_chain(RUNTIME), ADDRESS, contract.runtime_codehash(RUNTIME)
+    )
+
+
+def test_require_rescue_contract_rejects_other_codehash():
+    with pytest.raises(contract.RescueContractError, match="expected EthRescue build"):
+        contract.require_rescue_contract(
+            _code_chain(RUNTIME + b"\x00"), ADDRESS, contract.runtime_codehash(RUNTIME)
+        )
+
+
+def test_require_rescue_contract_without_pin_checks_typehash():
+    contract.require_rescue_contract(_code_chain(RUNTIME), ADDRESS)
+
+    with pytest.raises(contract.RescueContractError, match="not EthRescue"):
+        contract.require_rescue_contract(_code_chain(RUNTIME, b"\x00" * 32), ADDRESS)
+    with pytest.raises(contract.RescueContractError, match="not EthRescue"):
+        contract.require_rescue_contract(
+            _code_chain(RUNTIME, ValueError("revert")), ADDRESS
+        )
 
 
 def test_require_rescue_contract_rejects_empty_address():
-    w3 = SimpleNamespace(eth=SimpleNamespace(get_code=lambda address: b""))
-
     with pytest.raises(contract.RescueContractError, match="No EthRescue contract"):
-        contract.require_rescue_contract(w3, "0x" + "55" * 20)
+        contract.require_rescue_contract(_code_chain(b""), ADDRESS)
+
+
+def test_require_rescue_contract_rejects_delegated_account():
+    code = contract.DELEGATION_DESIGNATOR_PREFIX + b"\x11" * 20
+
+    with pytest.raises(contract.RescueContractError, match="delegated account"):
+        contract.require_rescue_contract(
+            _code_chain(code), ADDRESS, contract.runtime_codehash(code)
+        )
+
+
+def test_rescue_request_typehash_matches_the_eip712_type():
+    assert contract.RESCUE_REQUEST_TYPEHASH == keccak(
+        text="RescueRequest(address rescuer,address safe,uint256 deadline,"
+        "bytes32 actionsHash)"
+    )
+
+
+def test_decode_rescue_results():
+    from eth_abi import encode
+
+    assert contract.decode_rescue_results(encode(["bool[]"], [[True, False]])) == [
+        True,
+        False,
+    ]

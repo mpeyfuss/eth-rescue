@@ -18,10 +18,37 @@ def test_anvil_accepts_sponsored_7702_clear_authorization(anvil_w3: Web3):
         )
         anvil_w3.eth.wait_for_transaction_receipt(funding_hash)
 
+    delegate_to = "0x" + "77" * 20
+    authorization = Account.sign_authorization(
+        {"chainId": anvil_w3.eth.chain_id, "address": delegate_to, "nonce": 0},
+        victim.key,
+    )
+    delegate = sponsor.sign_transaction(
+        {
+            "type": 4,
+            "chainId": anvil_w3.eth.chain_id,
+            "nonce": 0,
+            "maxPriorityFeePerGas": 1_000_000_000,
+            "maxFeePerGas": 2_000_000_000,
+            "gas": 200_000,
+            "to": sponsor.address,
+            "value": 0,
+            "data": b"",
+            "accessList": [],
+            "authorizationList": [authorization],
+        }
+    )
+    anvil_w3.eth.wait_for_transaction_receipt(
+        anvil_w3.eth.send_raw_transaction(delegate.raw_transaction)
+    )
+    assert bytes(anvil_w3.eth.get_code(victim.address)) == (
+        bytes.fromhex("ef0100") + bytes.fromhex(delegate_to[2:])
+    )
+
     raw_transaction = _sign_7702_undelegation(
         chain_id=anvil_w3.eth.chain_id,
-        tx_nonce=0,
-        authority_nonce=0,
+        tx_nonce=1,
+        authority_nonce=1,
         authority_key=victim.key,
         sponsor_key=sponsor.key,
         sponsor_address=sponsor.address,
@@ -32,6 +59,6 @@ def test_anvil_accepts_sponsored_7702_clear_authorization(anvil_w3: Web3):
     receipt = anvil_w3.eth.wait_for_transaction_receipt(transaction_hash)
 
     assert receipt["status"] == 1
-    assert anvil_w3.eth.get_transaction_count(victim.address) == 1
+    assert anvil_w3.eth.get_transaction_count(victim.address) == 2
     assert anvil_w3.eth.get_code(victim.address) == b""
-    assert anvil_w3.eth.get_transaction_count(sponsor.address) == 1
+    assert anvil_w3.eth.get_transaction_count(sponsor.address) == 2

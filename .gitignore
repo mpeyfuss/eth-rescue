@@ -11,7 +11,9 @@ wheels/
 cache/
 out/
 dependencies/
-broadcast/
+**/broadcast/**/dry-run/
+**/broadcast/**/*.lock
+**/broadcast/**/run-latest.json
 
 # Web
 web/node_modules

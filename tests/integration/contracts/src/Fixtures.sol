@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity ^0.8.38;
 
 contract FixtureERC20 {
     mapping(address => uint256) public balanceOf;
@@ -131,5 +131,25 @@ contract FixtureGasBurner {
         assembly {
             invalid()
         }
+    }
+}
+
+contract FixtureReceiver {
+    uint256 public received;
+
+    receive() external payable {
+        received += msg.value;
+    }
+}
+
+contract FixtureSwitch {
+    bool public off;
+
+    function toggle() external {
+        off = !off;
+    }
+
+    function poke() external view {
+        require(!off, "switched off");
     }
 }

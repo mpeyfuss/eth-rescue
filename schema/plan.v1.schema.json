@@ -306,6 +306,20 @@
           "default": null,
           "title": "Label"
         },
+        "gas": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 8000000,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gas"
+        },
         "type": {
           "const": "transient_delist_erc721",
           "title": "Type",

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.31;
+pragma solidity 0.8.38;
 
-import {LibCall} from "solady-0.1.26/utils/LibCall.sol";
 import {ECDSA} from "@openzeppelin-contracts-5.6.1/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin-contracts-5.6.1/utils/cryptography/EIP712.sol";
 import {IERC165} from "@openzeppelin-contracts-5.6.1/utils/introspection/IERC165.sol";
 import {IERC721Receiver} from "@openzeppelin-contracts-5.6.1/token/ERC721/IERC721Receiver.sol";
 import {IERC1155Receiver} from "@openzeppelin-contracts-5.6.1/token/ERC1155/IERC1155Receiver.sol";
+import {LibCall} from "solady-0.1.26/utils/LibCall.sol";
 
 /// @title EthRescue
 /// @notice Stateless singleton used as an EIP-7702 delegation target for rescue operations.
@@ -15,16 +15,15 @@ import {IERC1155Receiver} from "@openzeppelin-contracts-5.6.1/token/ERC1155/IERC
 ///
 ///      EIP-712: OpenZeppelin's cached domain separator only applies when `address(this)` is the
 ///      singleton itself. Under delegation `address(this)` is the delegating account, so the domain is
-///      rebuilt per call and binds every signature to that account and chain. The name and version are
-///      short strings, so EIP712's storage fallbacks are never read; this matters because a delegated
-///      account's storage may hold another delegate's leftovers.
+///      rebuilt per call and binds every signature to that account and chain.
 ///
-///      Gas: the contract never reads `gasleft()`. Each action is capped by its stipend so a hostile
-///      target cannot starve later actions or the sweep, and only the signed rescuer can submit, so
-///      the transaction gas limit is the client's responsibility. Under EIP-150 a call receives its
-///      full stipend only while 64/63 of it remains; the client budgets for that and keeps every
-///      transaction within the EIP-7825 cap so no EIP-8037 state-gas reservoir is involved.
+///      Gas: the contract never checks `gasleft()` and records failed actions instead of reverting, so
+///      `eth_estimateGas` can return a limit at which actions silently run out of gas. Clients should
+///      budget instead: per action, its stipend plus 1/63 (EIP-150 forwards the full stipend only
+///      while 64/63 of it remains), call overhead and calldata; plus fixed costs and the sweep. Keep
+///      every transaction within the EIP-7825 cap so no EIP-8037 state-gas reservoir is involved (if EIP-8037 goes through).
 /// @author mpeyfuss
+/// @custom:version 1.0.0
 contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
     /////////////////////////////////////////////////////////////////////
     // TYPES
@@ -60,6 +59,7 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
     /////////////////////////////////////////////////////////////////////
 
     /// @dev Reports EVM call success only; a non-reverting call may still have failed at the protocol level.
+    ///      A target without code is reported as a failure and is not called.
     event ActionResult(uint256 indexed index, bool success);
 
     /////////////////////////////////////////////////////////////////////
@@ -78,6 +78,8 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
     // FUNCTIONS
     /////////////////////////////////////////////////////////////////////
 
+    /// @dev Keep name and version under 32 bytes. Longer strings make `eip712Domain()` read them from
+    ///      storage, which under delegation is the account's, not the singleton's.
     constructor() EIP712("EthRescue", "1") {}
 
     receive() external payable {}
@@ -115,7 +117,14 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
     }
 
     /// @notice Runs every action as optional (failures never revert) and sweeps the full native balance.
-    function rescue(RescueRequest calldata request, Action[] calldata actions, bytes calldata signature) external {
+    /// @return results Each action's `ActionResult` success flag. On-chain the caller is the rescuer EOA, so
+    ///         nothing reads this; it exists for off-chain `eth_call` dry runs, which return data but not
+    ///         logs. Clients use it to predict per-action failures before signing, including actions that
+    ///         only succeed after an earlier one in the same batch (e.g. delist, then transfer).
+    function rescue(RescueRequest calldata request, Action[] calldata actions, bytes calldata signature)
+        external
+        returns (bool[] memory results)
+    {
         _verifyRequest(request, actions, signature);
 
         uint256 numActions = actions.length;
@@ -126,9 +135,10 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
             }
         }
 
+        results = new bool[](numActions);
         for (uint256 i; i < numActions; ++i) {
-            Action calldata action = actions[i];
-            (bool success,,) = LibCall.tryCall(action.target, 0, action.gasStipend, 0, action.data);
+            bool success = _call(actions[i]);
+            results[i] = success;
             emit ActionResult(i, success);
         }
 
@@ -150,6 +160,13 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
         if (keccak256(abi.encode(actions)) != request.actionsHash) revert ActionsMismatch();
         // Reverts with OpenZeppelin's ECDSA errors for malformed, wrong-length or high-s signatures.
         if (ECDSA.recoverCalldata(rescueRequestDigest(request), signature) != address(this)) revert InvalidSignature();
+    }
+
+    /// @dev A target without code is reported as a failure: a codeless call always "succeeds" and proves
+    ///      nothing. No return data is copied (`maxCopy` 0), which bounds hostile return data.
+    function _call(Action calldata action) private returns (bool success) {
+        if (action.target.code.length == 0) return false;
+        (success,,) = LibCall.tryCall(action.target, 0, action.gasStipend, 0, action.data);
     }
 
     function _sweepEth(address safe) private {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.31;
+pragma solidity 0.8.38;
 
 import {Test} from "forge-std-1.16.2/Test.sol";
 import {ERC20} from "solady-0.1.26/tokens/ERC20.sol";
@@ -486,6 +486,33 @@ contract EthRescueTest is Test {
         _rescue(actions);
 
         assertEq(noReturn.calls(), 1);
+    }
+
+    function testReturnsEachActionResult() public {
+        RevertingTarget revertingTarget = new RevertingTarget();
+        CallRecorder recorder = new CallRecorder();
+        EthRescue.Action[] memory actions = new EthRescue.Action[](3);
+        actions[0] = _action(address(revertingTarget), 100_000, abi.encodeCall(revertingTarget.fail, ()));
+        actions[1] = _action(address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
+        actions[2] = _action(makeAddr("eoa"), 100_000, abi.encodeCall(recorder.record, ()));
+        EthRescue.RescueRequest memory request = _request(actions);
+        bytes memory signature = _sign(VICTIM_KEY, victim, request);
+
+        vm.prank(rescuer);
+        bool[] memory results = delegated.rescue(request, actions, signature);
+
+        assertEq(results.length, 3);
+        assertFalse(results[0]);
+        assertTrue(results[1]);
+        assertFalse(results[2]);
+    }
+
+    function testCodelessTargetIsReportedAsFailure() public {
+        address eoa = makeAddr("eoa");
+
+        vm.expectEmit(true, false, false, true, victim);
+        emit EthRescue.ActionResult(0, false);
+        _rescue(_singleAction(eoa, 100_000, ""));
     }
 
     function testInvalidActionShapesRevertBeforeExecution() public {

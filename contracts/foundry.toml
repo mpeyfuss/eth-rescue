@@ -3,14 +3,28 @@ src = 'src'
 test = 'test'
 out = 'out'
 libs = ["dependencies"]
-auto_detect_solc = true
+script = 'script'
+# Everything below shapes the init code, and with it the CreateX address on every
+# chain (script/Deploy.s.sol). Changing any of it, or the contract, moves the address.
+solc = "0.8.38"
+evm_version = "prague"
 optimizer = true
 optimizer_runs = 6900
+bytecode_hash = "none"
+cbor_metadata = false
 verbosity = 3
 show_progress = true
 
 [fuzz]
 runs = 1024
+
+[rpc_endpoints]
+sepolia = "${SEPOLIA_RPC_URL}"
+mainnet = "${MAINNET_RPC_URL}"
+
+[etherscan]
+sepolia = { key = "${ETHERSCAN_API_KEY}" }
+mainnet = { key = "${ETHERSCAN_API_KEY}" }
 
 [dependencies]
 forge-std = "1.16.2"

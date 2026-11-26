@@ -146,6 +146,39 @@ def test_max_uint256_amount_accepted():
         ),
         (_plan([{"type": "nft", "contract": TOKEN}]), "type"),
         (
+            _plan([ERC721], safe="0x0000000000000000000000000000000000000000"),
+            "zero address",
+        ),
+        (_plan([ERC721 | {"contract": VICTIM}]), "compromised wallet"),
+        (
+            _plan(
+                [
+                    {
+                        "type": "custom",
+                        "target": VICTIM,
+                        "signature": "f()",
+                        "args": [],
+                        "gas": 50_000,
+                    }
+                ]
+            ),
+            "compromised wallet",
+        ),
+        (
+            _plan(
+                [
+                    {
+                        "type": "custom",
+                        "target": TOKEN,
+                        "signature": "f(uint)",
+                        "args": ["1"],
+                        "gas": 50_000,
+                    }
+                ]
+            ),
+            "canonical",
+        ),
+        (
             _plan(
                 [
                     {
@@ -173,6 +206,10 @@ def test_max_uint256_amount_accepted():
         "zero-gas",
         "amount-overflow",
         "unknown-action-type",
+        "zero-safe",
+        "victim-as-contract",
+        "victim-as-custom-target",
+        "non-canonical-signature",
         "custom-without-gas",
     ],
 )
@@ -197,3 +234,59 @@ def test_unencodable_custom_action_reports_index():
 def test_load_plan_missing_file(tmp_path):
     with pytest.raises(PlanError, match="could not read"):
         load_plan(tmp_path / "missing.json")
+
+
+def test_transient_delist_accepts_gas_override():
+    action = {
+        "type": "transient_delist_erc721",
+        "auction_house": AUCTION_HOUSE,
+        "contract": TOKEN,
+        "token_id": "5",
+        "gas": 400_000,
+    }
+
+    delist, _transfer = expand(parse_plan(_plan([action])))
+
+    assert delist["gas_estimate"] == 400_000
+
+
+def test_multi_call_labels_name_each_call():
+    action = {
+        "type": "transient_delist_erc721",
+        "auction_house": AUCTION_HOUSE,
+        "contract": TOKEN,
+        "token_id": "5",
+        "label": "Listed NFT",
+    }
+
+    delist, transfer = expand(parse_plan(_plan([action])))
+
+    assert delist["description"] == "Listed NFT (delist)"
+    assert transfer["description"] == "Listed NFT (transferFrom)"
+    assert (delist["plan_action"], delist["plan_step"]) == (0, 0)
+    assert (transfer["plan_action"], transfer["plan_step"]) == (0, 1)
+
+
+def test_custom_bool_argument_is_strict():
+    action = {
+        "type": "custom",
+        "target": TOKEN,
+        "signature": "setApprovalForAll(address,bool)",
+        "args": [SAFE, "true"],
+        "gas": 50_000,
+    }
+
+    with pytest.raises(PlanError, match="expected true or false"):
+        parse_plan(_plan([action]))
+
+    action["args"] = [SAFE, True]
+    [call] = expand(parse_plan(_plan([action])))
+    assert call["args"] == [SAFE, True]
+
+
+def test_load_plan_rejects_invalid_utf8(tmp_path):
+    path = tmp_path / "plan.json"
+    path.write_bytes(b"\xff\xfe{}")
+
+    with pytest.raises(PlanError, match="UTF-8"):
+        load_plan(path)

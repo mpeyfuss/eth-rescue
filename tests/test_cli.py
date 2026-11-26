@@ -77,7 +77,8 @@ def test_run_rejects_invalid_plan_before_connecting(tmp_path, monkeypatch, capsy
 
 
 def test_run_refuses_network_without_eth_rescue_before_connecting(monkeypatch, capsys):
-    monkeypatch.setitem(cli.NETWORKS["mainnet"], "eth_rescue", None)
+    monkeypatch.setitem(cli.NETWORKS["mainnet"], "eth_rescue", "0x" + "55" * 20)
+    monkeypatch.setitem(cli.NETWORKS["mainnet"], "eth_rescue_codehash", None)
     monkeypatch.setattr(cli, "connect", lambda *a, **k: pytest.fail("connected"))
     monkeypatch.setattr(cli, "read_accounts", lambda plan: pytest.fail("read keys"))
 
@@ -147,3 +148,61 @@ def test_rescue_commands_default_and_parse_gas_multiplier():
     assert parser.parse_args(
         ["run", "plan.json", "--gas-multiplier", "3"]
     ).gas_multiplier == Decimal(3)
+
+
+def test_hidden_prompt_refuses_to_echo_the_key(monkeypatch):
+    def echoing(prompt):
+        cli.warnings.warn("echo", cli.getpass.GetPassWarning)
+        return "0x" + "11" * 32
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.getpass, "getpass", echoing)
+
+    with pytest.raises(CliError, match="cannot hide typed input"):
+        read_accounts(_plan())
+
+
+def test_hidden_prompt_eof_is_a_clean_error(monkeypatch):
+    def eof(prompt):
+        raise EOFError
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.getpass, "getpass", eof)
+
+    with pytest.raises(CliError, match="no private key"):
+        read_accounts(_plan())
+
+
+def test_confirm_treats_eof_as_no(monkeypatch):
+    def eof():
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", eof)
+
+    assert cli._confirm() is False
+
+
+@pytest.mark.parametrize("value", ["inf", "nan", "-1", "abc"])
+def test_funding_timeout_rejects_non_finite_or_negative(value):
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli.funding_timeout(value)
+
+
+def test_funding_timeout_accepts_zero():
+    assert cli.funding_timeout("0") == 0
+
+
+def test_interrupt_in_json_mode_stays_ndjson(monkeypatch, capsys):
+    def interrupt(plan):
+        raise KeyboardInterrupt
+
+    monkeypatch.setitem(cli.NETWORKS["mainnet"], "eth_rescue", "0x" + "55" * 20)
+    monkeypatch.setitem(
+        cli.NETWORKS["mainnet"], "eth_rescue_codehash", "0x" + "00" * 32
+    )
+    monkeypatch.setattr(cli, "connect", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "read_accounts", interrupt)
+
+    assert main(["run", str(EXAMPLE), "--json"]) == cli.INTERRUPTED
+    for line in capsys.readouterr().out.splitlines():
+        json.loads(line)

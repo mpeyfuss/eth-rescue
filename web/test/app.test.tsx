@@ -14,15 +14,40 @@ function planJson(): Record<string, unknown> {
   return JSON.parse(screen.getByLabelText("Plan JSON").textContent ?? "");
 }
 
+async function openEmergency(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: /My wallet is compromised/i }));
+}
+
 async function paste(user: ReturnType<typeof userEvent.setup>, label: string, value: string) {
   const input = screen.getByLabelText(label);
   await user.click(input);
   await user.paste(value);
 }
 
+test("initial state shows only the two doors until one is chosen", async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  expect(screen.getByRole("button", { name: /My wallet is compromised/i })).toBeDefined();
+  expect(screen.getByRole("button", { name: /Prepare a break-glass plan/i })).toBeDefined();
+  expect(screen.queryByLabelText("Compromised wallet")).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: /Prepare a break-glass plan/i }));
+  expect(screen.getByRole("heading", { name: "Before an emergency" })).toBeDefined();
+  expect(screen.getByRole("heading", { name: "Verify and store your break-glass plan" })).toBeDefined();
+  expect(screen.getByLabelText("Compromised wallet")).toBeDefined();
+
+  await user.click(screen.getByRole("button", { name: "Active emergency" }));
+  expect(screen.getByRole("heading", { name: "Before you start" })).toBeDefined();
+
+  await user.click(screen.getByRole("button", { name: "Start over" }));
+  expect(screen.queryByLabelText("Compromised wallet")).toBeNull();
+  expect(screen.getByRole("button", { name: /My wallet is compromised/i })).toBeDefined();
+});
+
 test("builds an exportable plan from the form", async () => {
   const user = userEvent.setup();
   render(<App />);
+  await openEmergency(user);
   const download = screen.getByRole("button", { name: "Download plan.json" });
   expect(download).toHaveProperty("disabled", true);
 
@@ -46,6 +71,7 @@ test("builds an exportable plan from the form", async () => {
 test("refuses a pasted private key", async () => {
   const user = userEvent.setup();
   render(<App />);
+  await openEmergency(user);
   await paste(user, "Safe wallet", `0x${"ab".repeat(32)}`);
   expect(screen.getByLabelText("Safe wallet")).toHaveProperty("value", "");
   expect(screen.getByRole("alert").textContent).toContain("looks like a private key");
@@ -55,12 +81,13 @@ test("refuses a pasted private key", async () => {
 test("shows field errors once a value is entered", async () => {
   const user = userEvent.setup();
   render(<App />);
+  await openEmergency(user);
   await paste(user, "Compromised wallet", VICTIM);
   await paste(user, "Safe wallet", VICTIM);
   const safe = screen.getByLabelText("Safe wallet");
   expect(safe.getAttribute("aria-invalid")).toBe("true");
   const errorId = safe.getAttribute("aria-describedby") ?? "";
-  expect(document.getElementById(errorId)?.textContent).toBe("must differ from victim");
+  expect(document.getElementById(errorId)?.textContent).toBe("must differ from the compromised wallet");
 });
 
 test("imports a plan file", async () => {
@@ -91,6 +118,7 @@ test("reports an unreadable import", async () => {
 test("custom actions get one input per parameter", async () => {
   const user = userEvent.setup();
   render(<App />);
+  await openEmergency(user);
   await user.selectOptions(screen.getByLabelText("Action type"), "custom");
   await user.click(screen.getByRole("button", { name: "Add action" }));
   await paste(user, "Function signature", "transferPunk(address,uint256)");
@@ -103,6 +131,7 @@ test("custom actions get one input per parameter", async () => {
 test("a non-canonical signature names the canonical form", async () => {
   const user = userEvent.setup();
   render(<App />);
+  await openEmergency(user);
   await user.selectOptions(screen.getByLabelText("Action type"), "custom");
   await user.click(screen.getByRole("button", { name: "Add action" }));
   await paste(user, "Function signature", "transferPunk(address to, uint punkIndex)");
@@ -112,6 +141,7 @@ test("a non-canonical signature names the canonical form", async () => {
 test("custom arguments are never saved in the browser", async () => {
   const user = userEvent.setup();
   render(<App />);
+  await openEmergency(user);
   await user.selectOptions(screen.getByLabelText("Action type"), "custom");
   await user.click(screen.getByRole("button", { name: "Add action" }));
   await paste(user, "Function signature", "f(uint256)");
@@ -124,6 +154,7 @@ test("custom arguments are never saved in the browser", async () => {
 test("install guide follows the chosen operating system", async () => {
   const user = userEvent.setup();
   render(<App />);
+  await openEmergency(user);
   await user.click(screen.getByRole("button", { name: "Windows" }));
   expect(screen.getByLabelText("Assistant prompt").textContent).toContain("install.ps1");
   await user.click(screen.getByRole("button", { name: "macOS" }));
@@ -133,6 +164,7 @@ test("install guide follows the chosen operating system", async () => {
 test("the network picker and testnet plans are absent unless enabled", async () => {
   const user = userEvent.setup();
   const { container } = render(<App />);
+  await openEmergency(user);
   expect(screen.queryByLabelText("Network")).toBeNull();
   const plan = { version: 1, network: "sepolia", victim: VICTIM, safe: SAFE, actions: [] };
   const file = new File([JSON.stringify(plan)], "rehearsal.json", { type: "application/json" });

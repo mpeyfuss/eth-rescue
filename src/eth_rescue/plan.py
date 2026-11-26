@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from eth_abi.exceptions import EncodingError, ParseError
 from eth_utils import is_checksum_address, to_checksum_address
 from pydantic import (
     AfterValidator,
@@ -17,7 +16,7 @@ from pydantic import (
 
 from eth_rescue import templates
 from eth_rescue.bundle import MAX_ACTION_GAS
-from eth_rescue.calldata import build_calldata
+from eth_rescue.calldata import CalldataError, build_calldata, parse_signature
 from eth_rescue.types import RescueData
 
 MAX_UINT256 = 2**256 - 1
@@ -33,7 +32,17 @@ def _checksum(value: str) -> str:
     is_mixed_case = digits != digits.lower() and digits != digits.upper()
     if is_mixed_case and not is_checksum_address(value):
         raise ValueError("invalid address checksum")
+    if int(digits, 16) == 0:
+        raise ValueError("must not be the zero address")
     return to_checksum_address(value)
+
+
+def _canonical_signature(value: str) -> str:
+    try:
+        parse_signature(value)
+    except CalldataError as e:
+        raise ValueError(str(e)) from e
+    return value
 
 
 def _check_uint256(value: str) -> str:
@@ -90,7 +99,7 @@ class OwnershipAction(_SingleCallAction):
     contract: Address
 
 
-class TransientDelistErc721Action(_Action):
+class TransientDelistErc721Action(_SingleCallAction):
     type: Literal["transient_delist_erc721"]
     auction_house: Address
     contract: Address
@@ -100,7 +109,11 @@ class TransientDelistErc721Action(_Action):
 class CustomAction(_Action):
     type: Literal["custom"]
     target: Address
-    signature: str = Field(pattern=r"^[A-Za-z_$][A-Za-z0-9_$]*\(.*\)$")
+    signature: Annotated[
+        str,
+        Field(pattern=r"^[A-Za-z_$][A-Za-z0-9_$]*\(.*\)$"),
+        AfterValidator(_canonical_signature),
+    ]
     args: list[JsonValue]
     gas: Gas
 
@@ -137,6 +150,13 @@ class Plan(_Model):
             raise ValueError("safe must differ from victim")
         if self.gas_wallet in (self.victim, self.safe):
             raise ValueError("gas_wallet must differ from victim and safe")
+        for index, action in enumerate(self.actions):
+            for field in ("contract", "auction_house", "target"):
+                if getattr(action, field, None) == self.victim:
+                    # EthRescue runs as the victim and rejects calls to itself.
+                    raise ValueError(
+                        f"actions.{index}.{field} must not be the compromised wallet"
+                    )
         return self
 
 
@@ -180,27 +200,36 @@ def _template_calls(action: Action, plan: Plan) -> list[RescueData]:
             ]
 
 
-def _expand_action(action: Action, plan: Plan) -> list[RescueData]:
+def _expand_action(action: Action, plan: Plan, index: int = 0) -> list[RescueData]:
     calls = _template_calls(action, plan)
     gas = getattr(action, "gas", None)
-    for call in calls:
+    for step, call in enumerate(calls):
+        call["plan_action"] = index
+        call["plan_step"] = step
         if gas is not None:
             call["gas_estimate"] = gas
         if action.label:
-            call["description"] = action.label
+            name = call["function_signature"].split("(")[0]
+            call["description"] = (
+                f"{action.label} ({name})" if len(calls) > 1 else action.label
+            )
     return calls
 
 
 def expand(plan: Plan) -> list[RescueData]:
-    return [call for action in plan.actions for call in _expand_action(action, plan)]
+    return [
+        call
+        for index, action in enumerate(plan.actions)
+        for call in _expand_action(action, plan, index)
+    ]
 
 
 def _check_encodable(plan: Plan) -> None:
     for index, action in enumerate(plan.actions):
-        for call in _expand_action(action, plan):
+        for call in _expand_action(action, plan, index):
             try:
                 build_calldata(call["function_signature"], call["args"])
-            except (ValueError, EncodingError, ParseError) as e:
+            except CalldataError as e:
                 raise PlanError(f"actions.{index}: {e}") from e
 
 
@@ -223,9 +252,13 @@ def parse_plan(text: str) -> Plan:
 
 def load_plan(path: str | Path) -> Plan:
     try:
-        text = Path(path).read_text()
+        raw = Path(path).read_bytes()
     except OSError as e:
-        raise PlanError(f"could not read {path}: {e.strerror}") from e
+        raise PlanError(f"could not read {path}: {e.strerror or e}") from e
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise PlanError(f"could not read {path}: not valid UTF-8 text") from e
     return parse_plan(text)
 
 

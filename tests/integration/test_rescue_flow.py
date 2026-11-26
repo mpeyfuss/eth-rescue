@@ -33,7 +33,9 @@ def _execute_rescue(ctx, rescue_data):
 
 
 def _delegate_victim(w3: Web3, victim, gas, target: str) -> None:
-    priority_fee, max_fee_per_gas = _compute_fees(w3, Decimal(0))
+    priority_fee, max_fee_per_gas = _compute_fees(
+        w3, w3.eth.get_block("latest"), Decimal(0)
+    )
     authorization = Account.sign_authorization(
         {"chainId": w3.eth.chain_id, "address": target, "nonce": 0}, victim.key
     )
@@ -58,7 +60,7 @@ def _delegate_victim(w3: Web3, victim, gas, target: str) -> None:
 
 
 def test_plain_victim_rescues_asset_matrix_and_sweeps_eth(
-    anvil_w3, rescue_accounts, asset_contracts, sequential_relay, make_ctx
+    anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx
 ):
     victim, gas, safe = rescue_accounts
     erc20 = asset_contracts["erc20"]
@@ -102,15 +104,13 @@ def test_plain_victim_rescues_asset_matrix_and_sweeps_eth(
         < gas_balance - anvil_w3.eth.get_balance(gas.address)
         < bundle.required_funding
     )
-    assert len(sequential_relay.sent) == BUNDLE_BLOCK_RANGE
-    assert len(sequential_relay.submitted_receipts[0]) == len(bundle.transactions)
-    assert all(
-        receipt["status"] == 1 for receipt in sequential_relay.submitted_receipts[0]
-    )
+    assert len(relay.sent) == BUNDLE_BLOCK_RANGE
+    assert len(relay.landed[0]) == len(bundle.transactions)
+    assert all(receipt["status"] == 1 for receipt in relay.landed[0])
 
 
 def test_delegated_victim_is_undelegated_before_rescue(
-    anvil_w3, rescue_accounts, asset_contracts, sequential_relay, make_ctx
+    anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx
 ):
     victim, gas, safe = rescue_accounts
     erc20 = asset_contracts["erc20"]
@@ -132,11 +132,11 @@ def test_delegated_victim_is_undelegated_before_rescue(
     assert anvil_w3.eth.get_code(victim.address) == b""
     assert erc20.functions.balanceOf(safe.address).call() == 1_000
     assert anvil_w3.eth.get_transaction_count(victim.address) == starting_nonce + 3
-    assert len(sequential_relay.sent) == BUNDLE_BLOCK_RANGE
+    assert len(relay.sent) == BUNDLE_BLOCK_RANGE
 
 
 def test_delist_then_transfer_rescues_escrowed_erc721(
-    anvil_w3, rescue_accounts, asset_contracts, sequential_relay, make_ctx
+    anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx
 ):
     victim, gas, safe = rescue_accounts
     erc721 = asset_contracts["erc721"]
@@ -174,11 +174,11 @@ def test_delist_then_transfer_rescues_escrowed_erc721(
         == "0x0000000000000000000000000000000000000000"
     )
     assert erc721.functions.ownerOf(1).call() == safe.address
-    assert len(sequential_relay.sent) == BUNDLE_BLOCK_RANGE
+    assert len(relay.sent) == BUNDLE_BLOCK_RANGE
 
 
 def test_reverting_action_rolls_back_simulation_and_blocks_submission(
-    anvil_w3, rescue_accounts, asset_contracts, sequential_relay, make_ctx
+    anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx
 ):
     victim, gas, safe = rescue_accounts
     erc20 = asset_contracts["erc20"]
@@ -214,4 +214,4 @@ def test_reverting_action_rolls_back_simulation_and_blocks_submission(
         engine.send_with_retry(ctx, prepared, prepare_bundle)
         == ExitCode.SIMULATION_FAILED
     )
-    assert sequential_relay.sent == []
+    assert relay.sent == []

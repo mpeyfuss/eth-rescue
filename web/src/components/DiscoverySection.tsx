@@ -96,6 +96,9 @@ export function DiscoverySection({ draft, dispatch, scan: runScan = scanWallet }
           {status.kind === "scanning" ? "Scanning…" : "Scan wallet"}
         </button>
       </div>
+      {!canScan && status.kind !== "scanning" && (
+        <p className="field-hint">Enter a valid compromised wallet address in Step 1 to scan.</p>
+      )}
       {!alchemyKey && (
         <p className="field-hint">Token and NFT lookup needs an Alchemy API key (below). Transient lookup works without one.</p>
       )}
@@ -162,6 +165,11 @@ function ScanResults({ result, selected, inPlan, selectable, toggle }: ResultsPr
             <legend>
               {label} ({items.length})
             </legend>
+            {group === "tokens" && (
+              <p className="field-hint">
+                ERC-20 tokens are unchecked by default to skip spam airdrops—tick the ones you want to rescue.
+              </p>
+            )}
             {keys.length > 1 && (
               <div className="buttons">
                 <button type="button" className="link" onClick={() => toggle(keys, true)}>

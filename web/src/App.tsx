@@ -95,7 +95,7 @@ function useWalletSnapshot(
 
 export function App({ scan, onchain }: { scan?: Scan; onchain?: OnchainReader } = {}) {
   const [draft, dispatch] = useReducer(draftReducer, undefined, loadStoredDraft);
-  const [mode, setMode] = useState<Mode | null>(() => (isBlank(loadStoredDraft()) ? null : "emergency"));
+  const [mode, setMode] = useState<Mode | null>(null);
   const [step, setStep] = useState<StepId>("wallets");
   const stepperRef = useRef<HTMLElement>(null);
 
@@ -360,6 +360,7 @@ export function App({ scan, onchain }: { scan?: Scan; onchain?: OnchainReader } 
         <>
           <div className="doors-intro">
             <h2 id="doors-heading">What&apos;s your situation?</h2>
+            {!isBlank(draft) && <p className="muted">Your saved draft is kept. Pick an option to continue it.</p>}
           </div>
           <div className="doors" role="region" aria-labelledby="doors-heading">
             <button type="button" className="door emergency" onClick={() => chooseMode("emergency")}>

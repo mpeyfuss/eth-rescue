@@ -141,8 +141,8 @@ function walletIssues(plan: Record<string, unknown>, flagged: Issue[]): Issue[] 
 
 export function validatePlan(value: unknown): Issue[] {
   if (!isRecord(value)) return [{ path: "", message: "plan must be a JSON object" }];
-  const issues = schemaIssues(planValidator, value);
-  if (!issues.some((issue) => issue.path === "network") && !isAvailableNetwork(value.network)) {
+  const issues = schemaIssues(planValidator, value).filter((issue) => issue.path !== "network");
+  if (!isAvailableNetwork(value.network)) {
     issues.push({ path: "network", message: "is not supported here" });
   }
   issues.push(...walletIssues(value, issues));

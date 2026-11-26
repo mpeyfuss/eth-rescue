@@ -18,15 +18,6 @@ NETWORKS: dict[str, Network] = {
         "eth_rescue": None,
         "eth_rescue_codehash": None,
     },
-    "sepolia": {
-        "label": "Sepolia (testnet)",
-        "rpc": "https://ethereum-sepolia-rpc.publicnode.com",
-        "relay": "https://relay-sepolia.flashbots.net",
-        "chain_id": 11155111,
-        "builders": None,
-        "eth_rescue": "0xe9Da4345F6AB43e05FF3DE7999A99Dc30710421A",
-        "eth_rescue_codehash": "0x4066e42da7841bead9a6829d601b8219458298865f7562dc5a6a2563dd32474b",
-    },
 }
 
 

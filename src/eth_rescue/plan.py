@@ -60,7 +60,7 @@ Uint256 = Annotated[
 ]
 Gwei = Annotated[str, Field(pattern=r"^[0-9]+(\.[0-9]{1,9})?$")]
 Gas = Annotated[int, Field(gt=0, le=MAX_ACTION_GAS)]
-NetworkName = Literal["mainnet", "sepolia"]
+NetworkName = Literal["mainnet"]
 
 
 class _Model(BaseModel):

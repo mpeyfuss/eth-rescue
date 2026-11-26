@@ -97,20 +97,13 @@ test("token metadata is fetched for held tokens only, in one batch", async () =>
     }
     return { id: 1, result: balances };
   });
-  const result = await scanWallet({ network: "sepolia", victim: VICTIM, alchemyKey: "test-key" });
+  const result = await scanWallet({ network: "mainnet", victim: VICTIM, alchemyKey: "test-key" });
   expect(batch.map((call) => call.params[0])).toEqual([
     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
     "0x1111111111111111111111111111111111111111",
   ]);
   expect(result.candidates.map((candidate) => candidate.detail.split(" · ")[0])).toEqual(["5000000", "7"]);
-  expect(requests).toContain("eth-sepolia.g.alchemy.com/v2/test-key");
-});
-
-test("each network uses its own Transient API", async () => {
-  serve(() => ({ next: null, results: [] }));
-  await scanWallet({ network: "mainnet", victim: VICTIM, alchemyKey: null });
-  await scanWallet({ network: "sepolia", victim: VICTIM, alchemyKey: null });
-  expect(requests).toEqual(["api.transient.xyz/v1/catalog/users", "api-dev.transient.xyz/v1/catalog/users"]);
+  expect(requests).toContain("eth-mainnet.g.alchemy.com/v2/test-key");
 });
 
 test("an owner() RPC outage keeps the listings and marks the contracts", async () => {

@@ -64,7 +64,7 @@ make deploy-sepolia SIGNER_ARGS="--ledger --sender 0x..."  # any other forge sig
 
 The address depends only on the init code, so `foundry.toml` pins everything that shapes it (solc 0.8.38, EVM `prague`, optimizer runs, no metadata hash). Changing the contract or those settings moves the address. Running the script where EthRescue already exists sends nothing. It also refuses to run unless the factory's runtime codehash matches the canonical CreateX, so a different contract at CreateX's address can't put other code at EthRescue's address.
 
-The runtime codehash differs per chain, because EIP-712 caches the chain id in an immutable. The script prints it. Pin each network's address and codehash in `src/eth_rescue/networks.py` (`eth_rescue`, `eth_rescue_codehash`). The CLI refuses to sign a delegation unless the code at that address matches the hash, and refuses to run on a network without both pins.
+The runtime codehash differs per chain, because EIP-712 caches the chain id in an immutable. The script prints it. Pin each CLI network's address and codehash in `src/eth_rescue/networks.py` (`eth_rescue`, `eth_rescue_codehash`). The CLI refuses to sign a delegation unless the code at that address matches the hash, and refuses to run on a network without both pins. The CLI runs on mainnet only; the Sepolia deployment is pinned in `tests/integration/conftest.py`, where `make test-fork` checks it from the repository root.
 
 ## Development
 

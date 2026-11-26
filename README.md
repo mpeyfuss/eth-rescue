@@ -5,7 +5,7 @@
 You build a rescue plan (`plan.json`) in the web plan builder, or by hand, and the CLI runs it. The plan holds addresses only. The CLI asks for private keys in a hidden prompt on your own machine.
 
 > [!WARNING]
-> A clean simulation does not guarantee inclusion or recovery. An attacker holding the same key can spend the wallet's nonce or move assets first, builders may ignore the bundle, and private submission cannot make a contested account trustworthy. Rehearse on Sepolia with disposable accounts before a mainnet rescue.
+> A clean simulation does not guarantee inclusion or recovery. An attacker holding the same key can spend the wallet's nonce or move assets first, builders may ignore the bundle, and private submission cannot make a contested account trustworthy.
 
 > [!CAUTION]
 > This is experimental software provided "as is," without warranty of any kind. Use it entirely at your own risk. To the fullest extent permitted by law, the authors, maintainers, and contributors are not liable for lost funds or assets, failed or partial rescues, transaction fees, compromised credentials, or any other damages arising from its use. See the [MIT License](LICENSE) for the governing terms.
@@ -97,16 +97,9 @@ When phase 1 lands and phase 2 cannot finish, the exit code is 4 if phase 2's in
 
 [`schema/plan.v1.schema.json`](schema/plan.v1.schema.json) is the full schema, and [`examples/`](examples) has sample plans with placeholder addresses.
 
-### Sepolia rehearsal
+### Networks
 
-With disposable accounts and test assets:
-
-1. Run a plan with a few typed actions and confirm the outcome table and the safe's balances.
-2. Add a token transfer larger than the balance and confirm the fallback leaves it out and the run exits 5.
-3. Spend the compromised wallet's nonce from another terminal while `run` is submitting, and confirm phase 2 recovers the assets.
-4. Decline the confirmation and confirm nothing was sent.
-
-A rehearsal checks today's endpoints and your procedure. It cannot guarantee mainnet inclusion or prevent a nonce race.
+The CLI runs on Ethereum mainnet only. Testnet Flashbots relays rarely land bundles, so a testnet run can't show whether a rescue would work. The integration suite instead runs every rescue flow against the real EthRescue deployment on a fork of a live network (see [Integration tests](#integration-tests)).
 
 ## Web plan builder
 
@@ -126,6 +119,7 @@ uv run eth-rescue --help
 | `make fmt` / `make lint` | Ruff format and lint |
 | `make test` | Python unit tests |
 | `make test-integration` | Compile fixtures, run the Anvil suite on Osaka and Amsterdam |
+| `make test-fork` | Run the Anvil suite on a fork of Sepolia, against its EthRescue deployment (needs network access) |
 | `make schema` | Regenerate the plan schema and the web's TypeScript types |
 | `make web-install` / `web-dev` / `web-test` / `web-build` | The web app (Bun) |
 | `make test-all` | Unit, integration and web tests |
@@ -159,7 +153,9 @@ Measured on Anvil:
 
 ### Integration tests
 
-The integration suite needs `forge` and `anvil` from [Foundry](https://book.getfoundry.sh/getting-started/installation). Its relay double (`tests/integration/conftest.py`) gives bundles Flashbots semantics on Anvil: a bundle lands atomically, in order, in its target block, or not at all, and blocks advance only when the engine waits. It does not model builder competition, privacy or real base-fee movement, and it never contacts a public RPC or relay.
+The integration suite needs `forge` and `anvil` from [Foundry](https://book.getfoundry.sh/getting-started/installation). Its relay double (`tests/integration/conftest.py`) gives bundles Flashbots semantics on Anvil: a bundle lands atomically, in order, in its target block, or not at all, and blocks advance only when the engine waits. It does not model builder competition, privacy or real base-fee movement, and it never contacts a relay.
+
+`make test-fork` runs the same suite on an Anvil fork of a live network (`FORK_NETWORK`, default `sepolia`) at one block pinned for the run. It uses that network's EthRescue deployment instead of a fresh one: every run checks the pinned codehash, and a dedicated test checks that the deployed code is this checkout's build apart from its EIP-712 immutables. Sepolia's deployment is pinned in `tests/integration/conftest.py`, since Sepolia is not a CLI network; any network pinned in `networks.py` (mainnet, once deployed) can be forked too. `FORK_RPC_URL` overrides the public RPC, and `FORK_HARDFORK` (default `osaka`) must match the live chain's fork, because Anvil otherwise assumes its newest one.
 
 ## License
 

@@ -22,7 +22,7 @@ def _plan(**overrides) -> Plan:
     return Plan.model_validate(
         {
             "version": 1,
-            "network": "sepolia",
+            "network": "mainnet",
             "victim": VICTIM.address,
             "safe": SAFE.address,
             "actions": [{"type": "ownership", "contract": SAFE.address}],

@@ -3,12 +3,10 @@ import { sameAddress } from "../plan/address";
 import { actionKey, type Network } from "../plan/draft";
 import { type Candidate, fetchJson, requireArray, type Warn } from "./types";
 
-// Testnet data lives on Transient's dev API.
 const TRANSIENT_APIS: Record<Network, string> = {
   mainnet: "https://api.transient.xyz/v1/catalog",
-  sepolia: "https://api-dev.transient.xyz/v1/catalog",
 };
-const CHAIN_IDS: Record<Network, string> = { mainnet: "1", sepolia: "11155111" };
+const CHAIN_IDS: Record<Network, string> = { mainnet: "1" };
 const MAX_PAGES = 20;
 
 interface Page<T> {

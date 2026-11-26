@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { looksLikeSecret } from "../src/plan/address";
-import { draftReducer, emptyDraft, fromPlan, networkOptions, newAction, PlanImportError, toPlan } from "../src/plan/draft";
+import { draftReducer, emptyDraft, fromPlan, newAction, PlanImportError, toPlan } from "../src/plan/draft";
 
 const SAFE = "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1";
 
@@ -68,11 +68,6 @@ test("secrets are recognised", () => {
   expect(looksLikeSecret(`0x${"ab".repeat(32)}`)).toBe(true);
   expect(looksLikeSecret(Array(12).fill("abandon").join(" "))).toBe(true);
   expect(looksLikeSecret(SAFE)).toBe(false);
-});
-
-test("the testnet is offered only when enabled", () => {
-  expect(networkOptions(false).map((network) => network.value)).toEqual(["mainnet"]);
-  expect(networkOptions(true).map((network) => network.value)).toEqual(["mainnet", "sepolia"]);
 });
 
 test("looksLikeSecret finds keys and seed phrases inside other text", () => {

@@ -1,4 +1,4 @@
-.PHONY: fmt lint schema test test-unit test-integration test-all web-install web-dev web-test web-build
+.PHONY: fmt lint schema test test-unit test-integration test-fork test-all web-install web-dev web-test web-build
 
 fmt:
 	uv run ruff format .
@@ -22,6 +22,16 @@ test-integration:
 	forge build --root tests/integration/contracts
 	RUN_ANVIL_INTEGRATION=1 ANVIL_HARDFORK=osaka uv run pytest -m integration
 	RUN_ANVIL_INTEGRATION=1 ANVIL_HARDFORK=amsterdam uv run pytest -m integration
+
+# The integration suite on a fork of a live network, against its EthRescue
+# deployment. Needs network access; FORK_HARDFORK must match the live chain.
+FORK_NETWORK ?= sepolia
+FORK_HARDFORK ?= osaka
+
+test-fork:
+	forge build --root contracts
+	forge build --root tests/integration/contracts
+	RUN_ANVIL_INTEGRATION=1 FORK_NETWORK=$(FORK_NETWORK) ANVIL_HARDFORK=$(FORK_HARDFORK) uv run pytest -m integration
 
 test-all: test-unit test-integration web-test
 

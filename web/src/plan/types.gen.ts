@@ -4,7 +4,7 @@ export type JsonValue = unknown;
 
 export interface Plan {
   version: 1;
-  network: "mainnet" | "sepolia";
+  network: "mainnet";
   victim: string;
   safe: string;
   gas_wallet?: string | null;

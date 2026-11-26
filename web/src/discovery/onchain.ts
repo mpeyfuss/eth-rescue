@@ -3,11 +3,9 @@ import type { Network } from "../plan/draft";
 import { rpcUrl } from "./alchemy";
 import { REQUEST_TIMEOUT_MS } from "./types";
 
-// Multicall3 has the same address on mainnet and Sepolia.
 const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
 const PUBLIC_RPC: Record<Network, string> = {
   mainnet: "https://ethereum-rpc.publicnode.com",
-  sepolia: "https://ethereum-sepolia-rpc.publicnode.com",
 };
 const OWNABLE = parseAbi(["function owner() view returns (address)"]);
 

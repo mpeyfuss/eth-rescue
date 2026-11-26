@@ -5,6 +5,7 @@ import socket
 import subprocess
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +19,59 @@ from web3.exceptions import TransactionNotFound
 from web3.types import TxReceipt
 
 from eth_rescue.engine import RescueContext
+from eth_rescue.networks import NETWORKS
 from eth_rescue.types import BundleEntry, SimulationResult
 
+# When forking, this must match the live chain's fork: Anvil defaults to its latest.
 ANVIL_HARDFORK = os.environ.get("ANVIL_HARDFORK", "osaka")
+ANVIL_STARTUP_TIMEOUT = 30
 CONTRACT_OUT = Path(__file__).parent / "contracts" / "out" / "Fixtures.sol"
 ETH_RESCUE_OUT = Path(__file__).parents[2] / "contracts" / "out" / "EthRescue.sol"
+
+
+@dataclass(frozen=True)
+class ForkTarget:
+    rpc: str
+    eth_rescue: str
+    eth_rescue_codehash: str
+    block: int | None = None
+
+
+def _fork_targets() -> dict[str, ForkTarget]:
+    # Sepolia is not a CLI network (its Flashbots relay rarely lands bundles), but
+    # its EthRescue deployment is the one to fork-test until mainnet is pinned.
+    targets = {
+        "sepolia": ForkTarget(
+            rpc="https://ethereum-sepolia-rpc.publicnode.com",
+            eth_rescue="0xe9Da4345F6AB43e05FF3DE7999A99Dc30710421A",
+            eth_rescue_codehash="0x4066e42da7841bead9a6829d601b8219458298865f7562dc5a6a2563dd32474b",
+        )
+    }
+    for name, network in NETWORKS.items():
+        if network["eth_rescue"] and network["eth_rescue_codehash"]:
+            targets[name] = ForkTarget(
+                rpc=network["rpc"],
+                eth_rescue=network["eth_rescue"],
+                eth_rescue_codehash=network["eth_rescue_codehash"],
+            )
+    return targets
+
+
+@pytest.fixture(scope="session")
+def fork() -> ForkTarget | None:
+    """The live network the suite runs on (`FORK_NETWORK`), or None for a fresh
+    chain. Forked runs use the network's EthRescue deployment instead of a local one."""
+    name = os.environ.get("FORK_NETWORK")
+    if not name:
+        return None
+    target = _fork_targets().get(name)
+    if target is None:
+        pytest.fail(f"FORK_NETWORK={name} has no pinned EthRescue deployment")
+    rpc = os.environ.get("FORK_RPC_URL") or target.rpc
+    # One block for the session: every test sees the same state, and Anvil
+    # caches a pinned block's state on disk between test processes.
+    block = Web3(HTTPProvider(rpc, request_kwargs={"timeout": 10})).eth.block_number
+    return replace(target, rpc=rpc, block=block)
 
 
 def _available_port() -> int:
@@ -31,8 +80,14 @@ def _available_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _chain_args(fork: ForkTarget | None) -> list[str]:
+    if fork is None:
+        return ["--chain-id", "31337"]
+    return ["--fork-url", fork.rpc, "--fork-block-number", str(fork.block)]
+
+
 @pytest.fixture
-def anvil_w3() -> Iterator[Web3]:
+def anvil_w3(fork: ForkTarget | None) -> Iterator[Web3]:
     if os.environ.get("RUN_ANVIL_INTEGRATION") != "1":
         pytest.skip("set RUN_ANVIL_INTEGRATION=1 to run Anvil tests")
     executable = shutil.which("anvil")
@@ -49,8 +104,7 @@ def anvil_w3() -> Iterator[Web3]:
             "127.0.0.1",
             "--port",
             str(port),
-            "--chain-id",
-            "31337",
+            *_chain_args(fork),
             "--enable-tx-gas-limit",
             "--order",
             "fifo",
@@ -65,7 +119,7 @@ def anvil_w3() -> Iterator[Web3]:
     )
     url = f"http://127.0.0.1:{port}"
     w3 = Web3(HTTPProvider(url, request_kwargs={"timeout": 10}))
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + ANVIL_STARTUP_TIMEOUT
     while time.monotonic() < deadline:
         if process.poll() is not None:
             output, _ = process.communicate()
@@ -84,8 +138,13 @@ def anvil_w3() -> Iterator[Web3]:
             process.kill()
             output, _ = process.communicate(timeout=5)
         pytest.fail(
-            f"Anvil did not start within 10 seconds using {ANVIL_HARDFORK}:\n" + output
+            f"Anvil did not start within {ANVIL_STARTUP_TIMEOUT} seconds using "
+            f"{ANVIL_HARDFORK}:\n" + output
         )
+
+    if fork is not None:
+        # Anvil's well-known dev accounts carry live 7702 delegations on public chains.
+        w3.provider.make_request("anvil_setCode", [w3.eth.accounts[0], "0x"])
 
     try:
         yield w3
@@ -293,13 +352,16 @@ def asset_contracts(anvil_w3: Web3, rescue_accounts):
 
 
 @pytest.fixture
-def rescue_contract(anvil_w3: Web3):
-    """The EthRescue deployment victims delegate to, as `networks.py` pins it."""
-    return _deploy(anvil_w3, "EthRescue", ETH_RESCUE_OUT)
+def rescue_contract(anvil_w3: Web3, fork: ForkTarget | None):
+    """The EthRescue deployment victims delegate to: the live one when forking."""
+    if fork is None:
+        return _deploy(anvil_w3, "EthRescue", ETH_RESCUE_OUT)
+    abi, _bytecode = _artifact("EthRescue", ETH_RESCUE_OUT)
+    return anvil_w3.eth.contract(address=fork.eth_rescue, abi=abi)
 
 
 @pytest.fixture
-def make_ctx(anvil_w3: Web3, reporter, rescue_contract, relay):
+def make_ctx(anvil_w3: Web3, reporter, rescue_contract, relay, fork):
     """Build a RescueContext whose every sleep mines one block through the relay;
     extra fields override defaults."""
 
@@ -311,6 +373,7 @@ def make_ctx(anvil_w3: Web3, reporter, rescue_contract, relay):
             "safe": safe.address,
             "reporter": reporter,
             "rescue_contract": rescue_contract.address,
+            "rescue_codehash": fork.eth_rescue_codehash if fork else None,
             "poll_interval": 0,
             "funding_timeout": 0,
             "sleep": lambda seconds: relay.mine_block(),

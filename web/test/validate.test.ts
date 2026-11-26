@@ -96,7 +96,7 @@ test("custom gas is required", () => {
   expect(paths(value)).toEqual(["actions.0.gas: is required"]);
 });
 
-test("a testnet plan is not supported unless enabled", () => {
+test("a testnet plan is not supported", () => {
   expect(paths(plan({ network: "sepolia" }))).toEqual(["network: is not supported here"]);
 });
 

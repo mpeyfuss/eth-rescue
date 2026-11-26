@@ -4,7 +4,6 @@ import { type Candidate, fetchJson, requireArray, type Warn } from "./types";
 
 const HOSTS: Record<Network, string> = {
   mainnet: "eth-mainnet.g.alchemy.com",
-  sepolia: "eth-sepolia.g.alchemy.com",
 };
 const MAX_PAGES = 20;
 const METADATA_BATCH = 100;

@@ -359,10 +359,7 @@
       "type": "integer"
     },
     "network": {
-      "enum": [
-        "mainnet",
-        "sepolia"
-      ],
+      "const": "mainnet",
       "title": "Network",
       "type": "string"
     },

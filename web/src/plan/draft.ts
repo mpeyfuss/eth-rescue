@@ -6,15 +6,7 @@ export type Network = Plan["network"];
 export type PlanAction = Plan["actions"][number];
 export type ActionType = PlanAction["type"];
 
-const TESTNET: { value: Network; label: string } = { value: "sepolia", label: "Sepolia (testnet)" };
-
-// The testnet is for local rehearsals only; it exists in a build only when this flag is set.
-export function networkOptions(testnetEnabled: boolean): { value: Network; label: string }[] {
-  const mainnet = { value: "mainnet" as const, label: "Ethereum mainnet" };
-  return testnetEnabled ? [mainnet, TESTNET] : [mainnet];
-}
-
-export const NETWORKS = networkOptions(import.meta.env.VITE_ENABLE_SEPOLIA === "true");
+export const NETWORKS: { value: Network; label: string }[] = [{ value: "mainnet", label: "Ethereum mainnet" }];
 
 export function isAvailableNetwork(value: unknown): value is Network {
   return NETWORKS.some((network) => network.value === value);

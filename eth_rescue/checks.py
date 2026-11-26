@@ -8,6 +8,7 @@ from web3 import Web3
 from web3.exceptions import BadFunctionCallOutput, ContractLogicError
 
 from eth_rescue.abi import (
+    CRYPTOPUNKS_OWNER_ABI,
     ERC20_BALANCE_OF_ABI,
     ERC721_OWNER_OF_ABI,
     ERC1155_BALANCE_OF_ABI,
@@ -51,7 +52,7 @@ class ReadReverted(RuntimeError):
 def infer_check(data: RescueData) -> Check | None:
     """The recipient-side postcondition a typed action declares.
 
-    Checks are recipient-side deliberately: victim-side deltas would
+    Checks are recipient-side deliberately: compromised-side deltas would
     misclassify an attacker draining the asset mid-race as a successful rescue.
     Custom calls declare none, whatever their signature looks like.
     """
@@ -108,6 +109,11 @@ def _read_function(w3: Web3, check: Check):
         case "ownership":
             contract = w3.eth.contract(address=check.contract, abi=OWNABLE_OWNER_ABI)
             return contract.functions.owner()
+        case "cryptopunk":
+            contract = w3.eth.contract(
+                address=check.contract, abi=CRYPTOPUNKS_OWNER_ABI
+            )
+            return contract.functions.punkIndexToAddress(check.token_id)
     raise ReadUnavailable(f"unknown check kind {check.kind!r}")
 
 
@@ -175,12 +181,14 @@ def _evaluate_balance(index: int, check: Check, balances: _Balances) -> ActionOu
     wanted = check.amount or 0
     if got is None:
         return ActionOutcome(
-            index, "unverified", "the safe's balance could not be read"
+            index, "unverified", "the destination wallet's balance could not be read"
         )
     if got == wanted:
         return ActionOutcome(index, "rescued")
     if got == 0:
-        return ActionOutcome(index, "failed", "nothing arrived at the safe")
+        return ActionOutcome(
+            index, "failed", "nothing arrived at the destination wallet"
+        )
     return ActionOutcome(index, "partial", f"only {got} of {wanted} arrived")
 
 
@@ -218,8 +226,8 @@ def _evaluate_owner(w3, index: int, check: Check, block, sleep) -> ActionOutcome
         return ActionOutcome(
             index,
             "partial",
-            "the safe is the pending owner (Ownable2Step): call acceptOwnership() "
-            "from the safe to finish",
+            "the destination wallet is the pending owner (Ownable2Step): call "
+            "acceptOwnership() from the destination wallet to finish",
         )
     return ActionOutcome(index, "failed", f"owned by {owner}")
 

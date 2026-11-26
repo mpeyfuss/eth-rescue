@@ -5,6 +5,7 @@ from typing import get_args
 import pytest
 
 from eth_rescue import templates
+from eth_rescue.collections import COLLECTION_CONTRACTS
 from eth_rescue.plan import (
     NetworkName,
     PlanError,
@@ -19,8 +20,8 @@ ROOT = Path(__file__).parents[1]
 EXAMPLES = sorted((ROOT / "examples").glob("*.json"))
 SCHEMA_PATH = ROOT / "schema" / "plan.v1.schema.json"
 
-VICTIM = "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61"
-SAFE = "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1"
+COMPROMISED = "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61"
+DESTINATION = "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1"
 GAS = "0x2546BcD3c84621e976D8185a91A922aE77ECEc30"
 TOKEN = "0x5509102d66eEC09A994f978c80535572890f1Fef"
 AUCTION_HOUSE = "0x6f66b95a0C512f3497FB46660E0BC3B94B989F8d"
@@ -31,8 +32,8 @@ def _plan(actions: list[dict], **overrides) -> str:
         {
             "version": 1,
             "network": "mainnet",
-            "victim": VICTIM,
-            "safe": SAFE,
+            "compromised": COMPROMISED,
+            "destination": DESTINATION,
             "actions": actions,
         }
         | overrides
@@ -65,16 +66,16 @@ def test_defaults_applied():
 
 
 def test_addresses_are_checksummed():
-    plan = parse_plan(_plan([ERC721], victim=VICTIM.lower()))
+    plan = parse_plan(_plan([ERC721], compromised=COMPROMISED.lower()))
 
-    assert plan.victim == VICTIM
+    assert plan.compromised == COMPROMISED
 
 
-def test_erc721_fills_victim_safe_and_default_gas():
+def test_erc721_fills_compromised_destination_and_default_gas():
     [call] = expand(parse_plan(_plan([ERC721])))
 
     assert call["address"] == TOKEN
-    assert call["args"] == [VICTIM, SAFE, 78]
+    assert call["args"] == [COMPROMISED, DESTINATION, 78]
     assert call["gas_estimate"] == templates.GAS_ERC721
 
 
@@ -97,7 +98,7 @@ def test_transient_delist_expands_to_delist_then_transfer():
 
     assert delist["address"] == AUCTION_HOUSE
     assert delist["args"] == [TOKEN, 5]
-    assert transfer["args"] == [VICTIM, SAFE, 5]
+    assert transfer["args"] == [COMPROMISED, DESTINATION, 5]
 
 
 def test_custom_action_passes_args_through():
@@ -105,14 +106,44 @@ def test_custom_action_passes_args_through():
         "type": "custom",
         "target": TOKEN,
         "signature": "transferPunk(address,uint256)",
-        "args": [SAFE, "78"],
+        "args": [DESTINATION, "78"],
         "gas": 75_000,
     }
     [call] = expand(parse_plan(_plan([action])))
 
     assert call["function_signature"] == "transferPunk(address,uint256)"
-    assert call["args"] == [SAFE, "78"]
+    assert call["args"] == [DESTINATION, "78"]
     assert call["gas_estimate"] == 75_000
+
+
+def test_cryptopunk_action_calls_transfer_punk_on_the_network_contract():
+    [call] = expand(parse_plan(_plan([{"type": "cryptopunk", "token_id": "78"}])))
+
+    assert call["address"] == COLLECTION_CONTRACTS["mainnet"]["cryptopunk"]
+    assert call["function_signature"] == "transferPunk(address,uint256)"
+    assert call["args"] == [DESTINATION, 78]
+    assert call["check"]["kind"] == "cryptopunk"
+
+
+def test_superrare_v1_action_calls_transfer_on_the_network_contract():
+    [call] = expand(parse_plan(_plan([{"type": "superrare_v1", "token_id": "43"}])))
+
+    assert call["address"] == COLLECTION_CONTRACTS["mainnet"]["superrare_v1"]
+    assert call["function_signature"] == "transfer(address,uint256)"
+    assert call["args"] == [DESTINATION, 43]
+    assert call["check"]["kind"] == "erc721"
+
+
+def test_cryptopunk_index_must_be_below_10000():
+    with pytest.raises(PlanError, match="token_id"):
+        parse_plan(_plan([{"type": "cryptopunk", "token_id": "10000"}]))
+
+
+@pytest.mark.parametrize("collection", ["cryptopunk", "superrare_v1"])
+def test_generic_actions_on_collection_contracts_are_rejected(collection):
+    contract = COLLECTION_CONTRACTS["mainnet"][collection]
+    with pytest.raises(PlanError, match=f'needs a "{collection}" action'):
+        parse_plan(_plan([{"type": "erc721", "contract": contract, "token_id": "1"}]))
 
 
 def test_max_uint256_amount_accepted():
@@ -151,15 +182,15 @@ def test_action_gas_is_not_coerced():
         (_plan([ERC721], network="goerli"), "network"),
         (_plan([ERC721], extra=True), "extra"),
         (
-            _plan([ERC721], victim="0xD068c6a6db349a8ce9c7ad3706391e53417abf61"),
+            _plan([ERC721], compromised="0xD068c6a6db349a8ce9c7ad3706391e53417abf61"),
             "checksum",
         ),
-        (_plan([ERC721], safe=VICTIM), "safe must differ"),
+        (_plan([ERC721], destination=COMPROMISED), "destination must differ"),
         (
-            _plan([ERC721], safe=NETWORKS["mainnet"]["eth_rescue"].lower()),
+            _plan([ERC721], destination=NETWORKS["mainnet"]["eth_rescue"].lower()),
             "EthRescue contract",
         ),
-        (_plan([ERC721], gas_wallet=SAFE), "gas_wallet must differ"),
+        (_plan([ERC721], gas_wallet=DESTINATION), "gas_wallet must differ"),
         (_plan([ERC721 | {"token_id": 78}]), "token_id"),
         (_plan([ERC721 | {"token_id": "-1"}]), "token_id"),
         (_plan([ERC721 | {"gas": 0}]), "gas"),
@@ -183,16 +214,16 @@ def test_action_gas_is_not_coerced():
             "amount",
         ),
         (
-            _plan([ERC721], safe="0x0000000000000000000000000000000000000000"),
+            _plan([ERC721], destination="0x0000000000000000000000000000000000000000"),
             "zero address",
         ),
-        (_plan([ERC721 | {"contract": VICTIM}]), "compromised wallet"),
+        (_plan([ERC721 | {"contract": COMPROMISED}]), "compromised wallet"),
         (
             _plan(
                 [
                     {
                         "type": "custom",
-                        "target": VICTIM,
+                        "target": COMPROMISED,
                         "signature": "f()",
                         "args": [],
                         "gas": 50_000,
@@ -236,9 +267,9 @@ def test_action_gas_is_not_coerced():
         "unknown-network",
         "unknown-field",
         "bad-checksum",
-        "safe-is-victim",
-        "safe-is-ethrescue",
-        "gas-is-safe",
+        "destination-is-compromised",
+        "destination-is-ethrescue",
+        "gas-is-destination",
         "numeric-token-id",
         "negative-token-id",
         "zero-gas",
@@ -246,9 +277,9 @@ def test_action_gas_is_not_coerced():
         "unknown-action-type",
         "zero-erc20-amount",
         "zero-erc1155-amount",
-        "zero-safe",
-        "victim-as-contract",
-        "victim-as-custom-target",
+        "zero-destination",
+        "compromised-as-contract",
+        "compromised-as-custom-target",
         "non-canonical-signature",
         "custom-without-gas",
     ],
@@ -263,7 +294,7 @@ def test_unencodable_custom_action_reports_index():
         "type": "custom",
         "target": TOKEN,
         "signature": "transfer(address,uint256)",
-        "args": [SAFE],
+        "args": [DESTINATION],
         "gas": 50_000,
     }
 
@@ -312,16 +343,16 @@ def test_custom_bool_argument_is_strict():
         "type": "custom",
         "target": TOKEN,
         "signature": "setApprovalForAll(address,bool)",
-        "args": [SAFE, "true"],
+        "args": [DESTINATION, "true"],
         "gas": 50_000,
     }
 
     with pytest.raises(PlanError, match="expected true or false"):
         parse_plan(_plan([action]))
 
-    action["args"] = [SAFE, True]
+    action["args"] = [DESTINATION, True]
     [call] = expand(parse_plan(_plan([action])))
-    assert call["args"] == [SAFE, True]
+    assert call["args"] == [DESTINATION, True]
 
 
 def test_load_plan_rejects_invalid_utf8(tmp_path):
@@ -342,9 +373,9 @@ def test_zero_token_id_is_still_valid():
 
 def test_validation_messages_drop_pydantic_prefix():
     with pytest.raises(PlanError) as error:
-        parse_plan(_plan([ERC721], safe=VICTIM))
+        parse_plan(_plan([ERC721], destination=COMPROMISED))
 
-    assert str(error.value) == "safe must differ from victim"
+    assert str(error.value) == "destination must differ from the compromised wallet"
 
 
 def test_web_builder_knows_each_network_ethrescue_deployment():
@@ -353,3 +384,12 @@ def test_web_builder_knows_each_network_ethrescue_deployment():
     for name, network in NETWORKS.items():
         assert f'value: "{name}"' in draft
         assert f'ethRescue: "{network["eth_rescue"]}"' in draft
+
+
+def test_web_builder_knows_each_collection_contract():
+    web = (ROOT / "web" / "src" / "plan" / "collections.ts").read_text()
+
+    for network, contracts in COLLECTION_CONTRACTS.items():
+        assert f"{network}: {{" in web
+        for collection, address in contracts.items():
+            assert f'{collection}: "{address}"' in web

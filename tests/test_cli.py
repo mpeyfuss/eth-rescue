@@ -13,9 +13,9 @@ from eth_rescue.engine import ExitCode
 from eth_rescue.plan import Plan, plan_json_schema
 
 EXAMPLE = Path(__file__).parents[1] / "examples" / "full_plan.json"
-VICTIM = Account.create()
+COMPROMISED = Account.create()
 GAS = Account.create()
-SAFE = Account.create()
+DESTINATION = Account.create()
 
 
 def _plan(**overrides) -> Plan:
@@ -23,9 +23,9 @@ def _plan(**overrides) -> Plan:
         {
             "version": 1,
             "network": "mainnet",
-            "victim": VICTIM.address,
-            "safe": SAFE.address,
-            "actions": [{"type": "ownership", "contract": SAFE.address}],
+            "compromised": COMPROMISED.address,
+            "destination": DESTINATION.address,
+            "actions": [{"type": "ownership", "contract": DESTINATION.address}],
         }
         | overrides
     )
@@ -109,11 +109,11 @@ def test_run_refuses_network_without_eth_rescue_before_connecting(monkeypatch, c
 
 
 def test_read_accounts_returns_matching_keys(keys):
-    keys.extend([to_hex(VICTIM.key), to_hex(GAS.key)])
+    keys.extend([to_hex(COMPROMISED.key), to_hex(GAS.key)])
 
-    victim, gas = read_accounts(_plan(gas_wallet=GAS.address))
+    compromised, gas = read_accounts(_plan(gas_wallet=GAS.address))
 
-    assert (victim.address, gas.address) == (VICTIM.address, GAS.address)
+    assert (compromised.address, gas.address) == (COMPROMISED.address, GAS.address)
 
 
 def test_read_accounts_requires_terminal(monkeypatch):
@@ -130,22 +130,22 @@ def test_read_accounts_rejects_invalid_key(keys):
         read_accounts(_plan())
 
 
-def test_read_accounts_rejects_key_for_other_victim(keys):
+def test_read_accounts_rejects_key_for_other_compromised(keys):
     keys.append(to_hex(GAS.key))
 
-    with pytest.raises(CliError, match="plan's victim"):
+    with pytest.raises(CliError, match="plan's compromised"):
         read_accounts(_plan())
 
 
 def test_read_accounts_rejects_key_for_other_gas_wallet(keys):
-    keys.extend([to_hex(VICTIM.key), to_hex(Account.create().key)])
+    keys.extend([to_hex(COMPROMISED.key), to_hex(Account.create().key)])
 
     with pytest.raises(CliError, match="plan's gas_wallet"):
         read_accounts(_plan(gas_wallet=GAS.address))
 
 
-def test_read_accounts_rejects_safe_as_gas_wallet(keys):
-    keys.extend([to_hex(VICTIM.key), to_hex(SAFE.key)])
+def test_read_accounts_rejects_destination_as_gas_wallet(keys):
+    keys.extend([to_hex(COMPROMISED.key), to_hex(DESTINATION.key)])
 
     with pytest.raises(CliError, match="must differ"):
         read_accounts(_plan())
@@ -228,9 +228,9 @@ def test_interrupt_at_key_prompt_says_nothing_was_sent(monkeypatch, capsys):
 def test_mainnet_deployment_is_pinned():
     mainnet = cli.NETWORKS["mainnet"]
 
-    assert mainnet["eth_rescue"] == "0xe9Da4345F6AB43e05FF3DE7999A99Dc30710421A"
+    assert mainnet["eth_rescue"] == "0xdC7eC38149c572a29Ac89813eda47140Ac8cD969"
     assert mainnet["eth_rescue_codehash"] == (
-        "0x3e437fbd77867905e360820ecdc27ba719b11b80e2ff1b3f7972d3df599c7382"
+        "0x5635918452603f8714e9e5f7348cc9b7f4d397529d7a92ba2ed818db0e7048fa"
     )
 
 

@@ -34,19 +34,19 @@ Each command's `--help` lists its flags and exit codes. `--json` prints NDJSON e
 
 ### Accounts
 
-- **Compromised wallet (`victim`):** holds what is being rescued. You type its private key.
+- **Compromised wallet (`compromised`):** holds what is being rescued. You type its private key.
 - **Gas wallet:** pays every fee. It must be a plain account with no code. `gas-wallet new` prints a fresh one; save its key until you have recovered any leftover balance.
-- **Safe (`safe`):** receives every typed asset and all ETH left in the compromised wallet. It must differ from both other wallets. It can be an ordinary account or a smart wallet; a smart wallet must be able to make arbitrary calls, because ERC-721s arrive by `transferFrom`, which does not check whether the receiver can handle them.
+- **Destination wallet (`destination`):** receives every typed asset and all ETH left in the compromised wallet. It must differ from both other wallets, and only its address is needed. It can be an ordinary account or a smart wallet such as a Safe multisig. A smart wallet must already be deployed on the plan's network, accept ETH and ERC-1155s (`onERC1155Received`), and be able to make arbitrary calls, because ERC-721s arrive by `transferFrom`, which never checks whether the receiver can move them on.
 
 ### What `run` does
 
 1. Reads the plan and asks for the compromised-wallet and gas-wallet keys. If the plan names a `gas_wallet`, the key must match it.
 2. Checks that the network's EthRescue deployment is the pinned build (runtime codehash), and shows what the plan will do: network, the three wallets, every custom call, and whether the fallback is on.
 3. Waits until the gas wallet holds enough ETH, printing the amount. The amount covers base fees rising every block of a five-block window.
-4. **Phase 1, EIP-7702.** One or more transactions from the gas wallet delegate the compromised wallet to the EthRescue singleton and run every action as that wallet. A victim-signed EIP-712 request binds the gas wallet, the safe, a deadline and the exact action list. Each action reports its own result, so one failing action never blocks the others. The remaining ETH is swept to the safe in the same transaction.
+4. **Phase 1, EIP-7702.** One or more transactions from the gas wallet delegate the compromised wallet to the EthRescue singleton and run every action as that wallet. An EIP-712 request signed by the compromised wallet binds the gas wallet, the destination wallet, a deadline and the exact action list. Each action reports its own result, so one failing action never blocks the others. The remaining ETH is swept to the destination wallet in the same transaction.
 5. Simulates the exact signed bundle on the relay, then asks once before sending.
 6. Submits for five blocks at a time, rebuilding with fresh nonces and fees between windows, until included or `options.max_blocks` blocks have been submitted. Before each rebuild it checks whether an earlier bundle landed. If the gas wallet's nonce moved and no bundle is visible, it stops instead of resubmitting.
-7. Checks each action at the inclusion block: the safe's ERC-20/ERC-1155 balance went up by the amount, or the safe now owns the NFT or the contract.
+7. Checks each action at the inclusion block: the destination wallet's ERC-20/ERC-1155 balance went up by the amount, or the destination wallet now owns the NFT or the contract.
 8. **Phase 2, legacy fallback** (`options.legacy_fallback`, default on). Actions that failed or never ran are retried as direct transactions from the compromised wallet: clear the delegation, fund the wallet, send each action, sweep the ETH. It runs without asking again. An action that reverts in simulation, in any window, is left out so it cannot block the rest. Unverified and partial actions are never retried. The sweep is signed before the gas used is known, so unused gas money stays in the compromised wallet; the CLI prints the most that can be left behind.
 9. Prints the outcome table, the ETH left in the compromised wallet, and its delegation.
 
@@ -54,7 +54,7 @@ If the compromised wallet's nonce changes before the phase-1 transaction in the 
 
 ### Outcomes and exit codes
 
-Each action ends `rescued`, `partial` (some of the amount arrived, or an Ownable2Step contract now lists the safe as its pending owner: call `acceptOwnership()` from the safe), `unverified` (it ran, but nothing can check it: custom calls and delists), `failed`, or `not executed`. Confirm unverified actions yourself. A delist that has no effect while its NFT still reaches the safe (it was not listed) does not count against the rescue.
+Each action ends `rescued`, `partial` (some of the amount arrived, or an Ownable2Step contract now lists the destination wallet as its pending owner: call `acceptOwnership()` from the destination wallet), `unverified` (it ran, but nothing can check it: custom calls and delists), `failed`, or `not executed`. Confirm unverified actions yourself. A delist that has no effect while its NFT still reaches the destination wallet (it was not listed) does not count against the rescue.
 
 | Code | Meaning |
 | --- | --- |
@@ -75,8 +75,8 @@ When phase 1 lands and phase 2 cannot finish, the exit code is 4 if phase 2's in
 {
   "version": 1,
   "network": "mainnet",
-  "victim": "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61",
-  "safe": "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1",
+  "compromised": "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61",
+  "destination": "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1",
   "gas_wallet": "0x2546BcD3c84621e976D8185a91A922aE77ECEc30",
   "options": { "priority_fee_gwei": "2.5", "max_blocks": 25, "legacy_fallback": true },
   "actions": [
@@ -85,7 +85,9 @@ When phase 1 lands and phase 2 cannot finish, the exit code is 4 if phase 2's in
     { "type": "erc1155", "contract": "0x…", "token_id": "3", "amount": "5" },
     { "type": "ownership", "contract": "0x…" },
     { "type": "transient_delist_erc721", "auction_house": "0x…", "contract": "0x…", "token_id": "12" },
-    { "type": "custom", "target": "0x…", "signature": "transferPunk(address,uint256)", "args": ["0x…", "78"], "gas": 75000 }
+    { "type": "cryptopunk", "token_id": "78" },
+    { "type": "superrare_v1", "token_id": "43" },
+    { "type": "custom", "target": "0x…", "signature": "setApprovalForAll(address,bool)", "args": ["0x…", true], "gas": 75000 }
   ]
 }
 ```
@@ -93,7 +95,8 @@ When phase 1 lands and phase 2 cannot finish, the exit code is 4 if phase 2's in
 - Amounts, token IDs and the priority fee are decimal **strings**, so browsers never round them. Amounts must be above zero. `priority_fee_gwei` is added to every gas unit; the CLI warns above 50 gwei.
 - Addresses must be valid checksums (or all lowercase or all uppercase), non-zero, and no action may target the compromised wallet.
 - Every action takes an optional `label` and `gas` (a minimum; the CLI raises it from a live estimate).
-- `custom` calls the target as the compromised wallet; its arguments, not `safe`, decide where anything goes. The signature must be **canonical** (`uint256`, not `uint`; no parameter names, spaces or `returns`), because the selector is the hash of that exact text. Arguments are strict JSON: integers as numbers or decimal/`0x` strings, `bool` as `true`/`false`, `bytes` as `0x` hex of whole bytes, addresses as checksummed or lowercase hex, arrays and tuples as JSON arrays.
+- `cryptopunk` and `superrare_v1` rescue collections that predate ERC-721 and have no `transferFrom`. The contract comes from the network (`eth_rescue/collections.py`), so only the token ID is given; Punks are numbered 0 to 9999. A generic action pointed at either contract is rejected, because it would fail.
+- `custom` calls the target as the compromised wallet; its arguments, not `destination`, decide where anything goes. The signature must be **canonical** (`uint256`, not `uint`; no parameter names, spaces or `returns`), because the selector is the hash of that exact text. Arguments are strict JSON: integers as numbers or decimal/`0x` strings, `bool` as `true`/`false`, `bytes` as `0x` hex of whole bytes, addresses as checksummed or lowercase hex, arrays and tuples as JSON arrays.
 
 [`schema/plan.v1.schema.json`](schema/plan.v1.schema.json) is the JSON Schema. The CLI also checks what a schema cannot express: address checksums, distinct wallets, the uint256 range and canonical signatures, so run `validate` on a plan. [`examples/`](examples) has sample plans with placeholder addresses.
 
@@ -134,9 +137,9 @@ The ABI rules are shared with the web builder through `tests/fixtures/abi_vector
 
 EthRescue never checks gas itself, so the CLI's budget is all that stands between a rescue and starved actions. The constants and their reasoning live in `eth_rescue/bundle.py`. The rules:
 
-- **Measure, don't hardcode.** Each action's gas limit is a live `eth_estimateGas` × `--gas-multiplier`, with the template's gas as a floor that an estimate can only raise. The cost of sweeping to an empty safe comes from a live transfer estimate.
+- **Measure, don't hardcode.** Each action's gas limit is a live `eth_estimateGas` × `--gas-multiplier`, with the template's gas as a floor that an estimate can only raise. The cost of sweeping to an empty destination comes from a live transfer estimate.
 - **Size once, before any delegation changes.** Phase-1 estimates also describe the undelegated wallet that the legacy fallback runs as.
-- **Budget per rescue transaction:** `RESCUE_TX_FIXED_GAS` + `SWEEP_CALL_GAS` + the safe's receive cost + Σ(stipend + stipend/63 + `RESCUE_ACTION_OVERHEAD_GAS` + calldata at 40 gas/byte). The stipend/63 term is what makes EIP-150 forward the full stipend.
+- **Budget per rescue transaction:** `RESCUE_TX_FIXED_GAS` + `SWEEP_CALL_GAS` + the destination wallet's receive cost + Σ(stipend + stipend/63 + `RESCUE_ACTION_OVERHEAD_GAS` + calldata at 40 gas/byte). The stipend/63 term is what makes EIP-150 forward the full stipend.
 - **Estimates only raise the budget.** Each transaction's limit is max(budget, whole-transaction estimate × 1.5). The node's estimator can't see an action starving inside `rescue()`, because the transaction still succeeds, so an estimate is never used alone. If the RPC can't estimate (no type-4 or state-override support), the budget stands and the CLI warns.
 - **Never exceed 2^24 gas per transaction.** Under EIP-8037, gas above the EIP-7825 cap becomes a state-gas reservoir that `gasleft()` can't see and that bypasses call stipends.
 - **Test every fork.** `make test-integration` runs Osaka and Amsterdam with EIP-7825 enforced, and the gas-burner test asserts worst-case overhead uses at most 75% of its budget.
@@ -145,7 +148,7 @@ Measured on Anvil:
 
 | Operation | Osaka | Amsterdam |
 | --- | --- | --- |
-| Rescue tx: 1 ERC-721 action, fresh safe | 95.4k | 300.8k |
+| Rescue tx: 1 ERC-721 action, fresh destination | 95.4k | 300.8k |
 | ETH transfer to a fresh account | 21k | 204.6k |
 | ERC-20 / ERC-1155 transfer to a fresh holder | 50k / 52k | 139.5k / 141k |
 | Set 7702 delegation / clear it | 36.8k / 36.8k | 64k / 28.8k |

@@ -11,10 +11,10 @@ from eth_account.typed_transactions import TypedTransaction
 from hexbytes import HexBytes
 from web3 import Web3
 
-from eth_rescue import bundle, contract
+from eth_rescue import ui, bundle, contract
 from eth_rescue.templates import GAS_GENERIC
 
-SAFE = Web3.to_checksum_address("0x" + "22" * 20)
+DESTINATION = Web3.to_checksum_address("0x" + "22" * 20)
 TARGET = "0x000000000000000000000000000000000000dEaD"
 RESCUE_CONTRACT = "0x" + "55" * 20
 GWEI = 10**9
@@ -39,7 +39,7 @@ class FakeChain:
     """Just enough of web3.eth for the bundle builders; records every request
     that would reach the public RPC."""
 
-    def __init__(self, victim=None, gas=None, base_fee=10 * GWEI):
+    def __init__(self, compromised=None, gas=None, base_fee=10 * GWEI):
         self.chain_id = 1
         self.gas_limit = 60_000_000
         self.max_priority_fee = 1 * GWEI
@@ -50,8 +50,8 @@ class FakeChain:
         self.estimate_result = 10_000
         self.call_result = None  # None: every action succeeds
         self.requests = []
-        if victim:
-            self.nonces[victim.address] = 7
+        if compromised:
+            self.nonces[compromised.address] = 7
         if gas:
             self.nonces[gas.address] = 3
 
@@ -104,27 +104,27 @@ def accounts():
 
 @pytest.fixture
 def chain(accounts):
-    victim, gas = accounts
-    return FakeChain(victim, gas)
+    compromised, gas = accounts
+    return FakeChain(compromised, gas)
 
 
-def _prepare_7702(chain, accounts, actions=None, safe=SAFE):
-    victim, gas = accounts
+def _prepare_7702(chain, accounts, actions=None, destination=DESTINATION):
+    compromised, gas = accounts
     return bundle.prepare_7702_bundle(
         _w3(chain),
-        victim,
+        compromised,
         gas,
         actions or [_action()],
-        safe,
+        destination,
         Decimal(0),
         rescue_contract=RESCUE_CONTRACT,
     )
 
 
-def _prepare_legacy(chain, accounts, actions=None, safe=SAFE):
-    victim, gas = accounts
+def _prepare_legacy(chain, accounts, actions=None, destination=DESTINATION):
+    compromised, gas = accounts
     return bundle.prepare_bundle(
-        _w3(chain), victim, gas, actions or [_action()], safe, Decimal(0)
+        _w3(chain), compromised, gas, actions or [_action()], destination, Decimal(0)
     )
 
 
@@ -265,20 +265,22 @@ def test_size_actions_raises_limits_to_estimate_with_margin():
         {"to": "light", "data": "0x02", "gas": 75_000},
     ]
 
-    sized, failures = bundle.size_actions(_w3(chain), "victim", actions)
+    sized, failures = bundle.size_actions(_w3(chain), "compromised", actions)
 
     assert [action["gas"] for action in sized] == [210_000, 75_000]
     assert failures == {}
 
 
-def test_size_actions_estimates_the_victim_without_any_delegation():
+def test_size_actions_estimates_the_compromised_without_any_delegation():
     chain = _sizing_chain({"heavy": 140_000})
 
-    bundle.size_actions(_w3(chain), "victim", [{"to": "heavy", "data": "0x", "gas": 1}])
+    bundle.size_actions(
+        _w3(chain), "compromised", [{"to": "heavy", "data": "0x", "gas": 1}]
+    )
 
     [(_kind, transaction, override)] = chain.requests
-    assert transaction == {"from": "victim", "to": "heavy", "data": "0x"}
-    assert override == {"victim": {"code": "0x"}}
+    assert transaction == {"from": "compromised", "to": "heavy", "data": "0x"}
+    assert override == {"compromised": {"code": "0x"}}
 
 
 def test_size_actions_retries_without_override_when_rpc_refuses_it():
@@ -288,7 +290,7 @@ def test_size_actions_retries_without_override_when_rpc_refuses_it():
     )
 
     sized, failures = bundle.size_actions(
-        _w3(chain), "victim", [{"to": "t", "data": "0x", "gas": 1}]
+        _w3(chain), "compromised", [{"to": "t", "data": "0x", "gas": 1}]
     )
 
     assert sized[0]["gas"] == 135_000
@@ -297,19 +299,19 @@ def test_size_actions_retries_without_override_when_rpc_refuses_it():
 
 def test_size_actions_never_estimates_through_an_existing_delegation():
     chain = FakeChain()
-    chain.code["victim"] = b"\xef\x01\x00" + b"\x99" * 20
+    chain.code["compromised"] = b"\xef\x01\x00" + b"\x99" * 20
     chain.estimate_result = lambda tx, override: (
         ValueError("override unsupported") if override else 7_000_000
     )
 
     sized, failures = bundle.size_actions(
-        _w3(chain), "victim", [{"to": "t", "data": "0x", "gas": 75_000}]
+        _w3(chain), "compromised", [{"to": "t", "data": "0x", "gas": 75_000}]
     )
 
     assert sized[0]["gas"] == 75_000
     assert failures == {0: "override unsupported"}
     assert [override for _kind, _tx, override in chain.requests] == [
-        {"victim": {"code": "0x"}}
+        {"compromised": {"code": "0x"}}
     ]
 
 
@@ -320,7 +322,7 @@ def test_size_actions_does_not_rerun_a_revert_without_the_override():
     )
 
     sized, failures = bundle.size_actions(
-        _w3(chain), "victim", [{"to": "t", "data": "0x", "gas": 75_000}]
+        _w3(chain), "compromised", [{"to": "t", "data": "0x", "gas": 75_000}]
     )
 
     assert sized[0]["gas"] == 75_000
@@ -332,7 +334,7 @@ def test_size_actions_keeps_floor_and_reports_failed_estimates():
     chain = _sizing_chain({"gone": RuntimeError("execution reverted: wrong owner")})
 
     sized, failures = bundle.size_actions(
-        _w3(chain), "victim", [{"to": "gone", "data": "0x", "gas": 75_000}]
+        _w3(chain), "compromised", [{"to": "gone", "data": "0x", "gas": 75_000}]
     )
 
     assert sized[0]["gas"] == 75_000
@@ -343,7 +345,7 @@ def test_size_actions_caps_runaway_estimates():
     chain = _sizing_chain({"huge": 100_000_000})
 
     sized, _ = bundle.size_actions(
-        _w3(chain), "victim", [{"to": "huge", "data": "0x", "gas": 1}]
+        _w3(chain), "compromised", [{"to": "huge", "data": "0x", "gas": 1}]
     )
 
     assert sized[0]["gas"] == bundle.MAX_ACTION_GAS
@@ -353,67 +355,75 @@ def test_size_actions_applies_custom_multiplier_rounding_up():
     chain = _sizing_chain({"heavy": 100_001})
 
     sized, _ = bundle.size_actions(
-        _w3(chain), "victim", [{"to": "heavy", "data": "0x", "gas": 1}], Decimal("2.5")
+        _w3(chain),
+        "compromised",
+        [{"to": "heavy", "data": "0x", "gas": 1}],
+        Decimal("2.5"),
     )
 
     assert sized[0]["gas"] == 250_003
 
 
 # ---------------------------------------------------------------------------
-# safe_receive_gas
+# destination_receive_gas
 # ---------------------------------------------------------------------------
-def test_safe_receive_gas_is_zero_for_existing_eoa():
+def test_destination_receive_gas_is_zero_for_existing_eoa():
     chain = FakeChain()
-    chain.balances[SAFE] = 1
+    chain.balances[DESTINATION] = 1
 
-    assert bundle.safe_receive_gas(_w3(chain), SAFE) == 0
+    assert bundle.destination_receive_gas(_w3(chain), DESTINATION) == 0
     assert chain.requests == []
 
 
-def test_safe_receive_gas_uses_funded_probe_estimate_for_empty_safe():
+def test_destination_receive_gas_uses_funded_probe_estimate_for_empty_destination():
     chain = FakeChain()
     chain.estimate_result = 204_600
 
-    assert bundle.safe_receive_gas(_w3(chain), SAFE) == 183_600
+    assert bundle.destination_receive_gas(_w3(chain), DESTINATION) == 183_600
     [(_kind, transaction, override)] = chain.requests
-    assert transaction["to"] == SAFE and transaction["value"] == 1
+    assert transaction["to"] == DESTINATION and transaction["value"] == 1
     assert override == {transaction["from"]: {"balance": hex(bundle.PROBE_BALANCE)}}
 
 
-def test_safe_receive_gas_falls_back_for_empty_safe_without_estimate():
+def test_destination_receive_gas_falls_back_for_empty_destination_without_estimate():
     chain = FakeChain()
     chain.estimate_result = ValueError("insufficient funds")
 
-    assert bundle.safe_receive_gas(_w3(chain), SAFE) == bundle.NEW_ACCOUNT_GAS_FALLBACK
+    assert (
+        bundle.destination_receive_gas(_w3(chain), DESTINATION)
+        == bundle.NEW_ACCOUNT_GAS_FALLBACK
+    )
 
 
-def test_safe_receive_gas_gives_contract_safe_execution_gas():
+def test_destination_receive_gas_gives_contract_destination_execution_gas():
     chain = FakeChain()
-    chain.code[SAFE] = b"\x60\x00"
+    chain.code[DESTINATION] = b"\x60\x00"
     chain.estimate_result = ValueError("no estimate")
 
-    assert bundle.safe_receive_gas(_w3(chain), SAFE) == bundle.SWEEP_CALL_GAS
+    assert (
+        bundle.destination_receive_gas(_w3(chain), DESTINATION) == bundle.SWEEP_CALL_GAS
+    )
 
     chain.estimate_result = 21_000 + 60_000
-    assert bundle.safe_receive_gas(_w3(chain), SAFE) == 90_000
+    assert bundle.destination_receive_gas(_w3(chain), DESTINATION) == 90_000
 
 
 # ---------------------------------------------------------------------------
 # prepare_7702_bundle
 # ---------------------------------------------------------------------------
 def test_prepare_7702_bundle_shape_and_nonces(chain, accounts):
-    victim, gas = accounts
+    compromised, gas = accounts
 
     prepared = _prepare_7702(chain, accounts)
 
     [transaction] = prepared.transactions
     assert transaction.role == "rescue-7702"
     assert (transaction.batch_start, transaction.batch_size) == (0, 1)
-    assert (prepared.victim_nonce, prepared.gas_nonce) == (7, 3)
+    assert (prepared.compromised_nonce, prepared.gas_nonce) == (7, 3)
     assert prepared.target_block == 101
     decoded = _decode(transaction.signed_transaction)
     assert decoded["nonce"] == 3
-    assert decoded["to"] == HexBytes(victim.address)
+    assert decoded["to"] == HexBytes(compromised.address)
     [authorization] = decoded["authorizationList"]
     assert authorization["nonce"] == 7
     assert authorization["address"] == HexBytes(RESCUE_CONTRACT)
@@ -421,17 +431,17 @@ def test_prepare_7702_bundle_shape_and_nonces(chain, accounts):
 
 
 def test_prepare_7702_bundle_signs_request_bound_to_gas_wallet(chain, accounts):
-    _victim, gas = accounts
+    _compromised, gas = accounts
     action = _action()
 
     prepared = _prepare_7702(chain, accounts, [action])
 
     data = _decode(prepared.transactions[0].signed_transaction)["data"]
-    (rescuer, safe, deadline, signed_hash), actions, signature = _decode_rescue_call(
-        data
+    (rescuer, destination, deadline, signed_hash), actions, signature = (
+        _decode_rescue_call(data)
     )
     assert Web3.to_checksum_address(rescuer) == gas.address
-    assert Web3.to_checksum_address(safe) == SAFE
+    assert Web3.to_checksum_address(destination) == DESTINATION
     assert deadline == 1_000 + bundle.RESCUE_REQUEST_TTL
     assert signed_hash == contract.actions_hash([action])
     assert len(signature) == 65
@@ -456,7 +466,7 @@ def test_public_rpc_never_sees_the_real_authorization_or_request_signature(
 
 
 def test_dry_runs_use_keyless_rescuer_and_delegation_override(chain, accounts):
-    victim, gas = accounts
+    compromised, gas = accounts
 
     _prepare_7702(chain, accounts)
 
@@ -469,7 +479,7 @@ def test_dry_runs_use_keyless_rescuer_and_delegation_override(chain, accounts):
     dry_runs = [request for request in chain.requests if "data" in request[1]]
     assert {kind for kind, _tx, _override in dry_runs} == {"call", "estimate"}
     for _kind, transaction, override in dry_runs:
-        assert override == {victim.address: {"code": designator}}
+        assert override == {compromised.address: {"code": designator}}
         assert transaction["from"] != gas.address
         (rescuer, *_), _actions, _sig = _decode_rescue_call(
             HexBytes(transaction["data"])
@@ -530,7 +540,7 @@ def test_prepare_7702_bundle_raises_limit_to_estimate_plus_authorization(
 
 
 def test_prepare_7702_bundle_estimate_never_exceeds_transaction_cap(chain, accounts):
-    chain.balances[SAFE] = 1
+    chain.balances[DESTINATION] = 1
     chain.estimate_result = bundle.MAX_TX_GAS
 
     prepared = _prepare_7702(chain, accounts)
@@ -561,10 +571,10 @@ def test_prepare_7702_bundle_refuses_bundle_over_relay_size_limit(chain, account
 # prepare_bundle (legacy fallback)
 # ---------------------------------------------------------------------------
 def test_prepare_bundle_shape_fees_and_nonces(chain, accounts):
-    victim, gas = accounts
-    chain.code[victim.address] = bundle.DELEGATION_DESIGNATOR_PREFIX + b"\x55" * 20
-    chain.balances[victim.address] = 10**18
-    chain.balances[SAFE] = 1
+    compromised, gas = accounts
+    chain.code[compromised.address] = bundle.DELEGATION_DESIGNATOR_PREFIX + b"\x55" * 20
+    chain.balances[compromised.address] = 10**18
+    chain.balances[DESTINATION] = 1
     actions = [_action(gas=50_000), _action(gas=70_000)]
 
     prepared = _prepare_legacy(chain, accounts, actions)
@@ -597,12 +607,12 @@ def test_prepare_bundle_shape_fees_and_nonces(chain, accounts):
         gas.address
     )
     assert Account.recover_transaction(prepared.transactions[2].signed_transaction) == (
-        victim.address
+        compromised.address
     )
 
 
 def test_prepare_bundle_skips_undelegation_and_zero_sweep(chain, accounts):
-    chain.balances[SAFE] = 1
+    chain.balances[DESTINATION] = 1
     chain.base_fee = 0
     chain.max_priority_fee = 0
 
@@ -611,10 +621,10 @@ def test_prepare_bundle_skips_undelegation_and_zero_sweep(chain, accounts):
     assert [t.role for t in prepared.transactions] == ["fund", "rescue"]
 
 
-def test_prepare_bundle_gives_contract_safe_sweep_execution_gas(chain, accounts):
-    victim, _gas = accounts
-    chain.balances[victim.address] = 10**18
-    chain.code[SAFE] = b"\x60\x00"
+def test_prepare_bundle_gives_contract_destination_sweep_execution_gas(chain, accounts):
+    compromised, _gas = accounts
+    chain.balances[compromised.address] = 10**18
+    chain.code[DESTINATION] = b"\x60\x00"
     chain.estimate_result = ValueError("no estimate")
 
     prepared = _prepare_legacy(chain, accounts)
@@ -624,7 +634,7 @@ def test_prepare_bundle_gives_contract_safe_sweep_execution_gas(chain, accounts)
 
 
 def test_prepare_bundle_raises_gas_to_the_calldata_floor(chain, accounts):
-    chain.balances[SAFE] = 1
+    chain.balances[DESTINATION] = 1
     data = "0x" + "ff" * 10_000
 
     prepared = _prepare_legacy(chain, accounts, [_action(gas=25_000, data=data)])
@@ -645,16 +655,19 @@ def test_check_bundle_limits_counts_transactions():
 
 def test_required_funding_accounts_for_optional_undelegation():
     max_fee, effective_fee = 20, 10
-    victim_funding = 50_000 * max_fee + bundle.SWEEP_TX_GAS * effective_fee
+    compromised_funding = 50_000 * max_fee + bundle.SWEEP_TX_GAS * effective_fee
 
     plain = bundle._required_funding([50_000], max_fee, effective_fee, False)
     delegated = bundle._required_funding([50_000], max_fee, effective_fee, True)
 
     assert plain == int(
-        (victim_funding + bundle.FUNDING_TX_GAS * max_fee) * bundle.FUNDING_BUFFER
+        (compromised_funding + bundle.FUNDING_TX_GAS * max_fee) * bundle.FUNDING_BUFFER
     )
     assert delegated == int(
-        (victim_funding + (bundle.FUNDING_TX_GAS + bundle.UNDELEGATE_TX_GAS) * max_fee)
+        (
+            compromised_funding
+            + (bundle.FUNDING_TX_GAS + bundle.UNDELEGATE_TX_GAS) * max_fee
+        )
         * bundle.FUNDING_BUFFER
     )
 
@@ -683,14 +696,14 @@ def test_delegation_target_recognizes_only_delegation_designator():
 
 
 def test_sign_7702_undelegation_builds_type_4_clear_authorization():
-    victim = Account.create()
+    compromised = Account.create()
     gas = Account.create()
 
     raw_tx = bundle._sign_7702_undelegation(
         chain_id=1,
         tx_nonce=3,
         authority_nonce=9,
-        authority_key=victim.key,
+        authority_key=compromised.key,
         sponsor_key=gas.key,
         sponsor_address=gas.address,
         priority_fee=1_000_000_000,
@@ -735,7 +748,7 @@ def test_prepare_7702_bundle_refuses_gas_beyond_the_block_limit(chain, accounts)
 
 
 def test_prepare_bundle_refuses_gas_beyond_the_block_limit(chain, accounts):
-    chain.balances[SAFE] = 1
+    chain.balances[DESTINATION] = 1
     chain.gas_limit = 100_000
 
     with pytest.raises(bundle.BundleLimitError, match="more than a block holds"):
@@ -743,18 +756,17 @@ def test_prepare_bundle_refuses_gas_beyond_the_block_limit(chain, accounts):
 
 
 def test_prepare_bundle_warns_how_much_unused_gas_can_be_left_behind(chain, accounts):
-    chain.balances[SAFE] = 1
+    chain.balances[DESTINATION] = 1
 
     prepared = _prepare_legacy(chain, accounts, [_action(gas=50_000)])
 
     [warning] = prepared.warnings
     reserve = (50_000 + bundle.SWEEP_TX_GAS) * prepared.effective_fee_cap
-    expected = Web3.from_wei(reserve, "ether")
-    assert f"up to {expected} ETH" in warning
+    assert f"up to {ui.ether(reserve, round_up=True)}," in warning
 
 
 def test_only_the_first_rescue_transaction_pays_for_the_authorization(chain, accounts):
-    chain.balances[SAFE] = 1
+    chain.balances[DESTINATION] = 1
     chain.estimate_result = 8_000_000
     actions = [_action(gas=21_000) for _ in range(bundle.MAX_ACTIONS_PER_RESCUE + 1)]
 

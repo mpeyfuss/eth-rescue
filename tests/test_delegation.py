@@ -8,7 +8,7 @@ from eth_rescue.delegation import (
     replay_delegates,
 )
 
-VICTIM = Account.from_key(b"\x01" * 32)
+COMPROMISED = Account.from_key(b"\x01" * 32)
 OTHER = Account.from_key(b"\x02" * 32)
 RESCUE = "0x" + "55" * 20
 ATTACKER = "0x" + "99" * 20
@@ -17,7 +17,7 @@ ZERO = "0x" + "00" * 20
 CHAIN_ID = 1
 
 
-def _auth(delegate, nonce, account=VICTIM, chain_id=CHAIN_ID):
+def _auth(delegate, nonce, account=COMPROMISED, chain_id=CHAIN_ID):
     signed = Account.sign_authorization(
         {"chainId": chain_id, "address": delegate, "nonce": nonce}, account.key
     )
@@ -36,11 +36,13 @@ def _tx(sender=SPONSOR, *authorizations):
 
 
 def _replay(transactions, nonce=7, delegate=None):
-    return replay_delegates(transactions, VICTIM.address, CHAIN_ID, nonce, delegate)
+    return replay_delegates(
+        transactions, COMPROMISED.address, CHAIN_ID, nonce, delegate
+    )
 
 
 def test_authorization_signer_recovers_the_signer():
-    assert authorization_signer(_auth(RESCUE, 7)) == VICTIM.address
+    assert authorization_signer(_auth(RESCUE, 7)) == COMPROMISED.address
     assert authorization_signer(_auth(RESCUE, 7, OTHER)) == OTHER.address
 
 
@@ -55,22 +57,22 @@ def test_authorization_signer_rejects_high_s_and_bad_parity():
 def test_authorization_signer_of_a_tampered_tuple_is_someone_else():
     tampered = _auth(RESCUE, 7) | {"address": ATTACKER}
 
-    assert authorization_signer(tampered) != VICTIM.address
+    assert authorization_signer(tampered) != COMPROMISED.address
 
 
 def test_our_authorization_applies_at_the_current_nonce():
     assert _replay([_tx(SPONSOR, _auth(RESCUE, 7))]) == [RESCUE]
 
 
-def test_a_victim_transaction_ahead_spends_the_nonce():
+def test_a_compromised_transaction_ahead_spends_the_nonce():
     delegates = _replay(
-        [_tx(VICTIM.address), _tx(SPONSOR, _auth(RESCUE, 7))], delegate=ATTACKER
+        [_tx(COMPROMISED.address), _tx(SPONSOR, _auth(RESCUE, 7))], delegate=ATTACKER
     )
 
     assert delegates == [ATTACKER, ATTACKER]
 
 
-def test_an_earlier_victim_authorization_spends_the_nonce():
+def test_an_earlier_compromised_authorization_spends_the_nonce():
     delegates = _replay(
         [_tx(SPONSOR, _auth(ATTACKER, 7)), _tx(SPONSOR, _auth(RESCUE, 7))]
     )
@@ -80,7 +82,10 @@ def test_an_earlier_victim_authorization_spends_the_nonce():
 
 def test_sender_nonce_is_spent_before_its_own_authorizations():
     delegates = _replay(
-        [_tx(VICTIM.address, _auth(ATTACKER, 7)), _tx(VICTIM.address, _auth(RESCUE, 9))]
+        [
+            _tx(COMPROMISED.address, _auth(ATTACKER, 7)),
+            _tx(COMPROMISED.address, _auth(RESCUE, 9)),
+        ]
     )
 
     assert delegates == [None, RESCUE]

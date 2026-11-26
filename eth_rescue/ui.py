@@ -1,4 +1,5 @@
 import re
+from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Decimal
 from typing import Any
 
 from rich import box
@@ -90,8 +91,20 @@ def error(message: str) -> None:
     err_console.print(f"[red]ERROR[/red] {escape(plain(message))}")
 
 
-def ether(wei: int) -> str:
-    return f"{Web3.from_wei(wei, 'ether')} ETH"
+def ether(wei: int, *, round_up: bool = False) -> str:
+    """About four significant digits. Amounts someone must send round up, so
+    sending the shown figure is always enough."""
+    value = Decimal(wei) / Decimal(10**18)
+    if value == 0:
+        return "0 ETH"
+    places = max(4, 3 - value.adjusted())
+    rounding = ROUND_CEILING if round_up else ROUND_HALF_EVEN
+    rounded = value.quantize(Decimal(1).scaleb(-places), rounding=rounding)
+    return f"{rounded.normalize():f} ETH"
+
+
+def gwei(wei: int) -> str:
+    return f"{float(Web3.from_wei(wei, 'gwei')):.4g} gwei"
 
 
 def _title(action: RescueData) -> str:
@@ -123,43 +136,45 @@ def render_rescue_plan(actions: list[RescueData]) -> None:
 
 
 def render_bundle(bundle: PreparedBundle) -> None:
-    table = Table(title="Prepared bundle", box=box.ASCII)
-    table.add_column("#", justify="right", style="bold")
-    table.add_column("Transaction")
-    for i, transaction in enumerate(bundle.transactions, 1):
-        table.add_row(str(i), transaction.role)
-    console.print(table)
+    steps = " → ".join(transaction.role for transaction in bundle.transactions)
     info(
-        f"Target block {bundle.target_block} @ max "
-        f"{Web3.from_wei(bundle.max_fee_per_gas, 'gwei')} gwei; gas wallet needs "
-        f"{ether(bundle.required_funding)}"
+        f"Bundle for block {bundle.target_block}: {steps}. Max fee "
+        f"{gwei(bundle.max_fee_per_gas)}; the gas wallet needs "
+        f"{ether(bundle.required_funding, round_up=True)}."
     )
 
 
-def render_simulation_result(result: SimulationResult) -> None:
-    table = Table(title="Bundle simulation", box=box.ASCII)
-    table.add_column("#", justify="right", style="bold")
-    table.add_column("Tx hash", overflow="fold")
-    table.add_column("Gas used", justify="right")
-    table.add_column("Status", overflow="fold")
+def simulation_errors(result: SimulationResult) -> list[str]:
+    return [
+        str(tx.get("error") or tx.get("revert") or "")
+        for tx in result.get("results", [])
+    ]
 
-    for i, tx_result in enumerate(result.get("results", []), 1):
+
+def render_simulation_result(result: SimulationResult, bundle: PreparedBundle) -> None:
+    table = Table(title="Simulation", box=box.ASCII)
+    table.add_column("#", justify="right", style="bold")
+    table.add_column("Transaction")
+    table.add_column("Gas used", justify="right")
+    table.add_column("Result", overflow="fold")
+
+    results = result.get("results", [])
+    for i, (transaction, tx_result) in enumerate(zip(bundle.transactions, results), 1):
         error_text = tx_result.get("error") or tx_result.get("revert") or ""
         table.add_row(
             str(i),
-            _literal(tx_result.get("txHash", "")),
+            transaction.role,
             f"{int(tx_result.get('gasUsed', 0)):,}",
-            _literal(error_text or "OK"),
+            Text(plain(error_text), style="red")
+            if error_text
+            else Text("OK", style="green"),
         )
-
-    table.add_section()
-    table.add_row(
-        "",
-        "Total gas used",
-        f"{int(result.get('totalGasUsed', 0)):,}",
-        _literal(f"Bundle hash: {result.get('bundleHash', '')}"),
-    )
+    if len(results) > 1:
+        table.add_section()
+        table.add_row("", "Total", f"{int(result.get('totalGasUsed', 0)):,}", "")
     console.print(table)
+    if not any(simulation_errors(result)):
+        success("Simulation succeeded.")
 
 
 STATUS_STYLES = {
@@ -173,9 +188,9 @@ STATUS_LABELS = {"not_executed": "not executed"}
 
 
 def render_outcome_report(
-    actions: list[RescueData], outcomes: list[ActionOutcome]
+    actions: list[RescueData], outcomes: list[ActionOutcome], title: str = "Outcome"
 ) -> None:
-    table = Table(title="Rescue outcome", box=box.ASCII, show_lines=True)
+    table = Table(title=title, box=box.ASCII, show_lines=True)
     table.add_column("#", justify="right", style="bold")
     table.add_column("Action", overflow="fold")
     table.add_column("Result")
@@ -205,10 +220,8 @@ def render_outcome_report(
     console.print()
 
 
-def render_final_state(victim_balance: int, delegation: str | None) -> None:
-    info(
-        f"ETH left in the compromised wallet: {Web3.from_wei(victim_balance, 'ether')}"
-    )
+def render_final_state(compromised_balance: int, delegation: str | None) -> None:
+    info(f"ETH left in the compromised wallet: {ether(compromised_balance)}")
     if delegation is None:
         info("The compromised wallet has no EIP-7702 delegation.")
     else:

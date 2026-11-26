@@ -10,13 +10,14 @@ GAS_ERC721 = 250_000
 GAS_ERC1155 = 200_000
 GAS_OWNERSHIP = 60_000
 GAS_TRANSIENT_DELIST = 300_000
+GAS_CRYPTOPUNK = 250_000
 GAS_GENERIC = 250_000
 # Most gas one action may be given, in a plan or from a live estimate.
 MAX_ACTION_GAS = 8_000_000
 
 
 def erc20_transfer(contract: str, to: str, amount: int) -> RescueData:
-    """Transfer ERC20 tokens (amount in base units, e.g. wei) to a safe wallet."""
+    """Transfer ERC20 tokens (amount in base units, e.g. wei) to a destination wallet."""
     return {
         "address": contract,
         "function_signature": "transfer(address,uint256)",
@@ -33,14 +34,50 @@ def erc20_transfer(contract: str, to: str, amount: int) -> RescueData:
 
 
 def erc721_transfer(
-    contract: str, from_victim: str, to: str, token_id: int
+    contract: str, from_compromised: str, to: str, token_id: int
 ) -> RescueData:
     return {
         "address": contract,
         "function_signature": "transferFrom(address,address,uint256)",
-        "args": [from_victim, to, token_id],
+        "args": [from_compromised, to, token_id],
         "gas_estimate": GAS_ERC721,
         "description": f"ERC721 token #{token_id} -> {to}",
+        "check": {
+            "kind": "erc721",
+            "contract": contract,
+            "recipient": to,
+            "token_id": token_id,
+        },
+    }
+
+
+def cryptopunk_transfer(contract: str, to: str, punk_index: int) -> RescueData:
+    """CryptoPunks predate ERC-721: `transferPunk` moves a punk and cancels any
+    open sale offer on it."""
+    return {
+        "address": contract,
+        "function_signature": "transferPunk(address,uint256)",
+        "args": [to, punk_index],
+        "gas_estimate": GAS_CRYPTOPUNK,
+        "description": f"CryptoPunk #{punk_index} -> {to}",
+        "check": {
+            "kind": "cryptopunk",
+            "contract": contract,
+            "recipient": to,
+            "token_id": punk_index,
+        },
+    }
+
+
+def superrare_v1_transfer(contract: str, to: str, token_id: int) -> RescueData:
+    """SuperRare V1 follows a pre-final ERC-721 draft with `transfer` and no
+    `transferFrom`; `ownerOf` still works for the check."""
+    return {
+        "address": contract,
+        "function_signature": "transfer(address,uint256)",
+        "args": [to, token_id],
+        "gas_estimate": GAS_ERC721,
+        "description": f"SuperRare V1 token #{token_id} -> {to}",
         "check": {
             "kind": "erc721",
             "contract": contract,
@@ -53,7 +90,7 @@ def erc721_transfer(
 def transient_auction_house_erc721_rescue(
     auction_house: str,
     contract: str,
-    from_victim: str,
+    from_compromised: str,
     to: str,
     token_id: int,
 ) -> list[RescueData]:
@@ -66,17 +103,17 @@ def transient_auction_house_erc721_rescue(
             "gas_estimate": GAS_TRANSIENT_DELIST,
             "description": f"Delist ERC721 token #{token_id} from Transient Auction House",
         },
-        erc721_transfer(contract, from_victim, to, token_id),
+        erc721_transfer(contract, from_compromised, to, token_id),
     ]
 
 
 def erc1155_transfer(
-    contract: str, from_victim: str, to: str, token_id: int, amount: int
+    contract: str, from_compromised: str, to: str, token_id: int, amount: int
 ) -> RescueData:
     return {
         "address": contract,
         "function_signature": "safeTransferFrom(address,address,uint256,uint256,bytes)",
-        "args": [from_victim, to, token_id, amount, "0x"],
+        "args": [from_compromised, to, token_id, amount, "0x"],
         "gas_estimate": GAS_ERC1155,
         "description": f"ERC1155 token #{token_id} x{amount} -> {to}",
         "check": {

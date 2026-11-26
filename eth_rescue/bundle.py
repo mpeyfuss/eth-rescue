@@ -23,6 +23,7 @@ from eth_rescue.contract import (
     sign_rescue_request,
 )
 from eth_rescue.templates import GAS_GENERIC, MAX_ACTION_GAS
+from eth_rescue.ui import ether
 from eth_rescue.types import (
     BundleTransaction,
     PreparedAction,
@@ -44,8 +45,8 @@ MAX_TX_GAS = 2**24
 # Intrinsic + authorization + request verification + dispatch, excluding the
 # sweep. Measured ~46k Osaka, ~86k Amsterdam (sweep included).
 RESCUE_TX_FIXED_GAS = 150_000
-# The sweep CALL to an existing safe, and the minimum allowed for a contract
-# safe's receive(); creating an empty safe is budgeted from a live estimate.
+# The sweep CALL to an existing destination, and the minimum allowed for a contract
+# destination wallet's receive(); creating an empty destination is budgeted from a live estimate.
 SWEEP_CALL_GAS = 40_000
 # Per action beyond its stipend: cold call, ActionResult event and loop (~3k
 # measured on both forks), plus actions-hash work.
@@ -59,7 +60,7 @@ FLOOR_GAS_PER_ZERO_BYTE = 10
 FLOOR_GAS_PER_NONZERO_BYTE = 40
 TX_BASE_GAS = 21_000
 AUTHORIZATION_GAS = 25_000  # EIP-7702 PER_EMPTY_ACCOUNT_COST, charged up front
-# Used only when no live estimate of a transfer to an empty safe is possible;
+# Used only when no live estimate of a transfer to an empty destination is possible;
 # covers Amsterdam's 120 * CPSB = 183,600 new-account state gas.
 NEW_ACCOUNT_GAS_FALLBACK = 250_000
 # Whole-transaction estimates only ever raise the constant budget. The node's
@@ -127,7 +128,7 @@ def _window_fee_cap(
 @dataclass(frozen=True)
 class _ChainState:
     chain_id: int
-    victim_nonce: int
+    compromised_nonce: int
     gas_nonce: int
     priority_fee: int
     max_fee_per_gas: int
@@ -138,16 +139,19 @@ class _ChainState:
 
 
 def _chain_state(
-    w3: Web3, victim: LocalAccount, gas: LocalAccount, extra_priority_fee_gwei: Decimal
+    w3: Web3,
+    compromised: LocalAccount,
+    gas: LocalAccount,
+    extra_priority_fee_gwei: Decimal,
 ) -> _ChainState:
     latest = w3.eth.get_block("latest")
     chain_id = w3.eth.chain_id
-    victim_nonce = w3.eth.get_transaction_count(victim.address)
+    compromised_nonce = w3.eth.get_transaction_count(compromised.address)
     gas_nonce = w3.eth.get_transaction_count(gas.address)
     priority_fee, max_fee_per_gas = _compute_fees(w3, latest, extra_priority_fee_gwei)
     return _ChainState(
         chain_id=chain_id,
-        victim_nonce=victim_nonce,
+        compromised_nonce=compromised_nonce,
         gas_nonce=gas_nonce,
         priority_fee=priority_fee,
         max_fee_per_gas=max_fee_per_gas,
@@ -237,7 +241,7 @@ def size_actions(
     The template or plan gas is a floor: an estimate (which an attacker may
     influence through chain state) can only increase a limit, never lower it.
     The sender is estimated without code, as the legacy fallback runs it, so an
-    attacker's existing delegation on the victim never executes here.
+    attacker's existing delegation on the compromised wallet never executes here.
     Returns the sized actions and the reason for each action whose estimate
     failed; those keep their floor.
     """
@@ -256,32 +260,32 @@ def size_actions(
     return sized, failures
 
 
-def _transfer_estimate(w3: Web3, safe: str) -> int | None:
-    """Gas for a 1-wei transfer to `safe`, from a probe address the state
+def _transfer_estimate(w3: Web3, destination: str) -> int | None:
+    """Gas for a 1-wei transfer to `destination`, from a probe address the state
     override funds (so a dust or empty gas wallet cannot break the estimate)."""
     sender = _probe_address()
     try:
         return w3.eth.estimate_gas(
-            {"from": sender, "to": safe, "value": 1},
+            {"from": sender, "to": destination, "value": 1},
             state_override={sender: {"balance": hex(PROBE_BALANCE)}},
         )
     except Exception:
         return None
 
 
-def safe_receive_gas(w3: Web3, safe: str) -> int:
-    """Gas an ETH transfer to `safe` needs beyond 21,000: the new-account charge
-    for an empty account, the receive() of a contract or delegated safe (at
+def destination_receive_gas(w3: Web3, destination: str) -> int:
+    """Gas an ETH transfer to `destination` needs beyond 21,000: the new-account charge
+    for an empty account, the receive() of a contract or delegated destination (at
     least SWEEP_CALL_GAS, raised by a live estimate), or 0 for a plain EOA."""
-    has_code = bool(w3.eth.get_code(safe))
+    has_code = bool(w3.eth.get_code(destination))
     empty = (
         not has_code
-        and w3.eth.get_transaction_count(safe) == 0
-        and w3.eth.get_balance(safe) == 0
+        and w3.eth.get_transaction_count(destination) == 0
+        and w3.eth.get_balance(destination) == 0
     )
     if not has_code and not empty:
         return 0
-    estimate = _transfer_estimate(w3, safe)
+    estimate = _transfer_estimate(w3, destination)
     if empty:
         if estimate is None:
             return NEW_ACCOUNT_GAS_FALLBACK
@@ -356,7 +360,7 @@ def _required_funding_7702(rescue_gas_limits: list[int], max_fee_per_gas: int) -
     return int(total_gas * max_fee_per_gas * FUNDING_BUFFER)
 
 
-def _victim_funding_value(
+def _compromised_funding_value(
     gas_limits: list[int],
     max_fee_per_gas: int,
     effective_fee_cap: int,
@@ -373,15 +377,15 @@ def _required_funding(
     needs_undelegation: bool = True,
     sweep_gas: int = SWEEP_TX_GAS,
 ) -> int:
-    """Total ETH the gas wallet must hold for sponsor txs and victim funding."""
-    victim_funding = _victim_funding_value(
+    """Total ETH the gas wallet must hold for sponsor txs and compromised funding."""
+    compromised_funding = _compromised_funding_value(
         gas_limits, max_fee_per_gas, effective_fee_cap, sweep_gas
     )
     sponsor_gas = FUNDING_TX_GAS
     if needs_undelegation:
         sponsor_gas += UNDELEGATE_TX_GAS
     sponsor_cost = sponsor_gas * max_fee_per_gas
-    return int((victim_funding + sponsor_cost) * FUNDING_BUFFER)
+    return int((compromised_funding + sponsor_cost) * FUNDING_BUFFER)
 
 
 def _sign_sponsored_call(
@@ -466,34 +470,36 @@ def has_7702_delegation(w3: Web3, address: str) -> bool:
 
 
 def _rescue_calldata(
-    victim: LocalAccount,
+    compromised: LocalAccount,
     chain_id: int,
     rescuer: str,
     batch: list[PreparedAction],
-    safe_address: str,
+    destination_address: str,
     deadline: int,
 ) -> bytes:
     request = RescueRequest(
         rescuer=rescuer,
-        safe=safe_address,
+        destination=destination_address,
         deadline=deadline,
         actions_hash=actions_hash(batch),
     )
-    signature = sign_rescue_request(victim.key, chain_id, victim.address, request)
+    signature = sign_rescue_request(
+        compromised.key, chain_id, compromised.address, request
+    )
     return encode_rescue_call(request, batch, signature)
 
 
 def _dry_run_batches(
     w3: Web3,
-    victim: LocalAccount,
+    compromised: LocalAccount,
     chain_id: int,
     rescue_contract: str,
     batches: list[list[PreparedAction]],
-    safe_address: str,
+    destination_address: str,
     deadline: int,
 ) -> tuple[list[int | None], list[bool | None], list[str]]:
     """Run each rescue() batch against the public RPC without exposing anything
-    usable: the victim is given the delegation by a state override instead of a
+    usable: the compromised wallet is given the delegation by a state override instead of a
     signed authorization, and each request is signed for a keyless probe
     rescuer, so EthRescue would reject it from any real sender.
 
@@ -502,7 +508,7 @@ def _dry_run_batches(
     same length as the real request, so the estimates carry over.
     """
     delegated = {
-        victim.address: {
+        compromised.address: {
             "code": to_hex(
                 DELEGATION_DESIGNATOR_PREFIX + to_canonical_address(rescue_contract)
             )
@@ -514,9 +520,13 @@ def _dry_run_batches(
     for index, batch in enumerate(batches):
         rescuer = _probe_address()
         calldata = _rescue_calldata(
-            victim, chain_id, rescuer, batch, safe_address, deadline
+            compromised, chain_id, rescuer, batch, destination_address, deadline
         )
-        transaction = {"from": rescuer, "to": victim.address, "data": to_hex(calldata)}
+        transaction = {
+            "from": rescuer,
+            "to": compromised.address,
+            "data": to_hex(calldata),
+        }
         try:
             results = decode_rescue_results(
                 w3.eth.call(transaction, "latest", delegated)
@@ -549,38 +559,50 @@ def _rescue_gas_limit(
 
 def prepare_7702_bundle(
     w3: Web3,
-    victim: LocalAccount,
+    compromised: LocalAccount,
     gas: LocalAccount,
     prepared: list[PreparedAction],
-    safe_address: str,
+    destination_address: str,
     extra_priority_fee_gwei: Decimal,
     *,
     rescue_contract: str,
 ) -> PreparedBundle:
-    """Build the phase-1 bundle: delegate the victim to the network's EthRescue
+    """Build the phase-1 bundle: delegate the compromised wallet to the network's EthRescue
     deployment and rescue everything in one sponsored call per batch, each
-    authorized by a victim-signed EIP-712 request bound to the gas wallet.
+    authorized by an EIP-712 request signed by the compromised wallet, bound to the gas wallet.
 
     All actions are optional inside rescue(): if one fails mid-race the call
     still succeeds, the bundle stays valid, and the full ETH balance is swept.
     Nothing signed here leaves the machine except in the bundle itself.
     """
-    state = _chain_state(w3, victim, gas, extra_priority_fee_gwei)
+    state = _chain_state(w3, compromised, gas, extra_priority_fee_gwei)
     chain_id = state.chain_id
     deadline = state.timestamp + RESCUE_REQUEST_TTL
 
-    base_gas = _rescue_base_gas(safe_receive_gas(w3, safe_address))
+    base_gas = _rescue_base_gas(destination_receive_gas(w3, destination_address))
     batches = _rescue_batches(prepared, base_gas)
     estimates, predicted, warnings = _dry_run_batches(
-        w3, victim, chain_id, rescue_contract, batches, safe_address, deadline
+        w3,
+        compromised,
+        chain_id,
+        rescue_contract,
+        batches,
+        destination_address,
+        deadline,
     )
 
     authorization = Account.sign_authorization(
-        {"chainId": chain_id, "address": rescue_contract, "nonce": state.victim_nonce},
-        victim.key,
+        {
+            "chainId": chain_id,
+            "address": rescue_contract,
+            "nonce": state.compromised_nonce,
+        },
+        compromised.key,
     )
     calldatas = [
-        _rescue_calldata(victim, chain_id, gas.address, batch, safe_address, deadline)
+        _rescue_calldata(
+            compromised, chain_id, gas.address, batch, destination_address, deadline
+        )
         for batch in batches
     ]
     gas_limits = [
@@ -598,11 +620,11 @@ def prepare_7702_bundle(
         zip(batches, calldatas, gas_limits)
     ):
         # The delegation set by the first rescue tx is live for the rest of the
-        # bundle, so continuation batches are plain sponsored calls to the victim.
+        # bundle, so continuation batches are plain sponsored calls to the compromised wallet.
         signed = _sign_sponsored_call(
             chain_id=chain_id,
             nonce=state.gas_nonce + offset,
-            to=victim.address,
+            to=compromised.address,
             data=calldata,
             gas=limit,
             priority_fee=state.priority_fee,
@@ -620,14 +642,14 @@ def prepare_7702_bundle(
 
     return PreparedBundle(
         transactions=transactions,
-        victim_nonce=state.victim_nonce,
+        compromised_nonce=state.compromised_nonce,
         gas_nonce=state.gas_nonce,
         priority_fee=state.priority_fee,
         max_fee_per_gas=state.max_fee_per_gas,
         effective_fee_cap=state.effective_fee_cap,
         target_block=state.target_block,
         required_funding=_required_funding_7702(gas_limits, state.max_fee_per_gas),
-        victim_funding=0,
+        compromised_funding=0,
         sweep_value=0,
         warnings=tuple(warnings),
         predicted=tuple(predicted),
@@ -636,30 +658,30 @@ def prepare_7702_bundle(
 
 def prepare_bundle(
     w3: Web3,
-    victim: LocalAccount,
+    compromised: LocalAccount,
     gas: LocalAccount,
     prepared: list[PreparedAction],
-    safe_address: str,
+    destination_address: str,
     extra_priority_fee_gwei: Decimal,
 ) -> PreparedBundle:
-    """Build the legacy bundle (victim-signed transactions) for the next block:
-    clear any delegation, fund the victim, send each action directly, and sweep
-    what is left to the safe."""
-    state = _chain_state(w3, victim, gas, extra_priority_fee_gwei)
+    """Build the legacy bundle (transactions signed by the compromised wallet) for the next block:
+    clear any delegation, fund the compromised wallet, send each action directly, and sweep
+    what is left to the destination wallet."""
+    state = _chain_state(w3, compromised, gas, extra_priority_fee_gwei)
     chain_id = state.chain_id
     max_fee_per_gas = state.max_fee_per_gas
     effective_fee_cap = state.effective_fee_cap
-    victim_balance = w3.eth.get_balance(victim.address)
-    needs_undelegation = has_7702_delegation(w3, victim.address)
-    sweep_gas = SWEEP_TX_GAS + safe_receive_gas(w3, safe_address)
+    compromised_balance = w3.eth.get_balance(compromised.address)
+    needs_undelegation = has_7702_delegation(w3, compromised.address)
+    sweep_gas = SWEEP_TX_GAS + destination_receive_gas(w3, destination_address)
     gas_limits = [_legacy_tx_gas(action) for action in prepared]
 
     # Each rescue tx pays at most effective_fee_cap per gas inside the window,
-    # so whatever the victim holds beyond that is swept.
+    # so whatever the compromised wallet holds beyond that is swept.
     rescue_cost = sum(limit * max_fee_per_gas for limit in gas_limits)
     rescue_fee_cap = sum(limit * effective_fee_cap for limit in gas_limits)
-    sweep_value = max(0, victim_balance + rescue_cost - rescue_fee_cap)
-    victim_funding = _victim_funding_value(
+    sweep_value = max(0, compromised_balance + rescue_cost - rescue_fee_cap)
+    compromised_funding = _compromised_funding_value(
         gas_limits, max_fee_per_gas, effective_fee_cap, sweep_gas
     )
     # The sweep is signed before anyone knows the gas actually used, so the gas
@@ -669,7 +691,7 @@ def prepare_bundle(
     leftover_warning = (
         "The fallback funds the compromised wallet for every transaction's full "
         "gas limit; whatever gas is left unused, up to "
-        f"{Web3.from_wei(reserve, 'ether')} ETH, stays in that wallet, where a "
+        f"{ether(reserve, round_up=True)}, stays in that wallet, where a "
         "sweeper can take it."
     )
 
@@ -679,7 +701,7 @@ def prepare_bundle(
     }
     transactions: list[BundleTransaction] = []
     nonce_offset = int(needs_undelegation)
-    victim_nonce = state.victim_nonce + nonce_offset
+    compromised_nonce = state.compromised_nonce + nonce_offset
     if needs_undelegation:
         transactions.append(
             BundleTransaction(
@@ -687,8 +709,8 @@ def prepare_bundle(
                 _sign_7702_undelegation(
                     chain_id=chain_id,
                     tx_nonce=state.gas_nonce,
-                    authority_nonce=state.victim_nonce,
-                    authority_key=victim.key,
+                    authority_nonce=state.compromised_nonce,
+                    authority_key=compromised.key,
                     sponsor_key=gas.key,
                     sponsor_address=gas.address,
                     priority_fee=state.priority_fee,
@@ -697,8 +719,8 @@ def prepare_bundle(
             )
         )
     funding_tx = {
-        "to": victim.address,
-        "value": victim_funding,
+        "to": compromised.address,
+        "value": compromised_funding,
         "gas": FUNDING_TX_GAS,
         "nonce": state.gas_nonce + nonce_offset,
         "chainId": chain_id,
@@ -713,29 +735,30 @@ def prepare_bundle(
             "to": action["to"],
             "data": action["data"],
             "gas": limit,
-            "nonce": victim_nonce + index,
+            "nonce": compromised_nonce + index,
             "chainId": chain_id,
         } | fees
         transactions.append(
             BundleTransaction(
                 "rescue",
-                Account.sign_transaction(tx, victim.key).raw_transaction,
+                Account.sign_transaction(tx, compromised.key).raw_transaction,
                 action_index=index,
             )
         )
     if sweep_value:
         sweep_tx = {
-            "to": safe_address,
+            "to": destination_address,
             "value": sweep_value,
             "gas": sweep_gas,
             "maxFeePerGas": effective_fee_cap,
             "maxPriorityFeePerGas": min(state.priority_fee, effective_fee_cap),
-            "nonce": victim_nonce + len(prepared),
+            "nonce": compromised_nonce + len(prepared),
             "chainId": chain_id,
         }
         transactions.append(
             BundleTransaction(
-                "sweep", Account.sign_transaction(sweep_tx, victim.key).raw_transaction
+                "sweep",
+                Account.sign_transaction(sweep_tx, compromised.key).raw_transaction,
             )
         )
     sponsor_gas = FUNDING_TX_GAS + (UNDELEGATE_TX_GAS if needs_undelegation else 0)
@@ -747,7 +770,7 @@ def prepare_bundle(
 
     return PreparedBundle(
         transactions=transactions,
-        victim_nonce=state.victim_nonce,
+        compromised_nonce=state.compromised_nonce,
         gas_nonce=state.gas_nonce,
         priority_fee=state.priority_fee,
         max_fee_per_gas=max_fee_per_gas,
@@ -760,7 +783,7 @@ def prepare_bundle(
             needs_undelegation,
             sweep_gas,
         ),
-        victim_funding=victim_funding,
+        compromised_funding=compromised_funding,
         sweep_value=sweep_value,
         warnings=(leftover_warning,),
     )

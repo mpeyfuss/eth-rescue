@@ -60,7 +60,7 @@ contract FixtureERC1155 {
 }
 
 // Rejects senders that carry code, so it fails under an EIP-7702 delegation and
-// only succeeds via a direct victim transaction (the legacy fallback).
+// only succeeds via a direct compromised transaction (the legacy fallback).
 contract FixtureCodeRejectingERC20 {
     mapping(address => uint256) public balanceOf;
 

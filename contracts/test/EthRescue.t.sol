@@ -69,7 +69,7 @@ contract RefundTarget {
     receive() external payable {}
 }
 
-contract RejectingSafe {
+contract RejectingDestination {
     receive() external payable {
         revert();
     }
@@ -78,12 +78,12 @@ contract RejectingSafe {
 contract ReentrantTarget {
     bytes4 public revertSelector;
 
-    /// @dev Names itself as rescuer to get past the sender check; the missing victim signature must stop it.
+    /// @dev Names itself as rescuer to get past the sender check; the missing compromised-wallet signature must stop it.
     function attemptRescue() external {
         EthRescue.Action[] memory actions = new EthRescue.Action[](0);
         EthRescue.RescueRequest memory request = EthRescue.RescueRequest({
             rescuer: address(this),
-            safe: address(0xdead),
+            destination: address(0xdead),
             deadline: block.timestamp,
             actionsHash: keccak256(abi.encode(actions))
         });
@@ -156,23 +156,23 @@ contract FixtureOwnable {
 }
 
 contract EthRescueTest is Test {
-    uint256 private constant VICTIM_KEY = 0xA11CE;
+    uint256 private constant COMPROMISED_KEY = 0xA11CE;
     uint256 private constant OTHER_KEY = 0xB0B;
     uint256 private constant SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
 
-    address private victim;
+    address private compromised;
     address private rescuer;
-    address private safe;
+    address private destination;
     EthRescue private implementation;
     EthRescue private delegated;
 
     function setUp() public {
-        victim = vm.addr(VICTIM_KEY);
+        compromised = vm.addr(COMPROMISED_KEY);
         rescuer = makeAddr("rescuer");
-        safe = makeAddr("safe");
+        destination = makeAddr("destination");
         implementation = new EthRescue();
-        delegated = EthRescue(payable(victim));
-        vm.signAndAttachDelegation(address(implementation), VICTIM_KEY);
+        delegated = EthRescue(payable(compromised));
+        vm.signAndAttachDelegation(address(implementation), COMPROMISED_KEY);
         _rescue(_emptyActions());
     }
 
@@ -183,14 +183,14 @@ contract EthRescueTest is Test {
     function testDigestMatchesEip712Encoding() public view {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
 
-        assertEq(delegated.rescueRequestDigest(request), _digest(victim, request));
+        assertEq(delegated.rescueRequestDigest(request), _digest(compromised, request));
     }
 
     function testDigestTracksChainIdAfterDeployment() public {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
         vm.chainId(vm.getChainId() + 1);
 
-        assertEq(delegated.rescueRequestDigest(request), _digest(victim, request));
+        assertEq(delegated.rescueRequestDigest(request), _digest(compromised, request));
     }
 
     function testEip712DomainReportsDelegatingAccount() public view {
@@ -201,16 +201,16 @@ contract EthRescueTest is Test {
         assertEq(name, "EthRescue");
         assertEq(version, "1");
         assertEq(chainId, block.chainid);
-        assertEq(verifyingContract, victim);
+        assertEq(verifyingContract, compromised);
     }
 
     function testDomainIgnoresLeftoverStorageInDelegatingAccount() public {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
         for (uint256 slot; slot < 8; ++slot) {
-            vm.store(victim, bytes32(slot), bytes32(type(uint256).max));
+            vm.store(compromised, bytes32(slot), bytes32(type(uint256).max));
         }
 
-        assertEq(delegated.rescueRequestDigest(request), _digest(victim, request));
+        assertEq(delegated.rescueRequestDigest(request), _digest(compromised, request));
         (, string memory name,,,,,) = delegated.eip712Domain();
         assertEq(name, "EthRescue");
     }
@@ -224,7 +224,7 @@ contract EthRescueTest is Test {
     function testOnlyBoundRescuerCanSubmit(address hacker) public {
         vm.assume(hacker != rescuer);
         EthRescue.RescueRequest memory request = _request(_emptyActions());
-        bytes memory signature = _sign(VICTIM_KEY, victim, request);
+        bytes memory signature = _sign(COMPROMISED_KEY, compromised, request);
 
         vm.prank(hacker);
         vm.expectRevert(EthRescue.NotRescuer.selector);
@@ -235,7 +235,7 @@ contract EthRescueTest is Test {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
 
         vm.expectRevert(EthRescue.InvalidSignature.selector);
-        _submit(request, _emptyActions(), _sign(OTHER_KEY, victim, request));
+        _submit(request, _emptyActions(), _sign(OTHER_KEY, compromised, request));
     }
 
     function testRejectsSignatureForAnotherDelegatedAccount() public {
@@ -250,7 +250,7 @@ contract EthRescueTest is Test {
 
     function testRejectsSignatureFromAnotherChain() public {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
-        bytes memory signature = _sign(VICTIM_KEY, victim, request);
+        bytes memory signature = _sign(COMPROMISED_KEY, compromised, request);
         vm.chainId(vm.getChainId() + 1);
 
         vm.expectRevert(EthRescue.InvalidSignature.selector);
@@ -259,7 +259,7 @@ contract EthRescueTest is Test {
 
     function testRejectsSignatureOnImplementation() public {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
-        bytes memory signature = _sign(VICTIM_KEY, address(implementation), request);
+        bytes memory signature = _sign(COMPROMISED_KEY, address(implementation), request);
 
         vm.prank(rescuer);
         vm.expectRevert(EthRescue.InvalidSignature.selector);
@@ -268,7 +268,7 @@ contract EthRescueTest is Test {
 
     function testRejectsHighSAndMalformedSignatures() public {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(VICTIM_KEY, _digest(victim, request));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(COMPROMISED_KEY, _digest(compromised, request));
         bytes32 highS = bytes32(SECP256K1_N - uint256(s));
 
         vm.expectRevert(abi.encodeWithSelector(ECDSA.ECDSAInvalidSignatureS.selector, highS));
@@ -295,11 +295,11 @@ contract EthRescueTest is Test {
     function testAcceptsRequestAtDeadline() public {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
         vm.warp(request.deadline);
-        vm.deal(victim, 1 ether);
+        vm.deal(compromised, 1 ether);
 
         _submit(request, _emptyActions());
 
-        assertEq(safe.balance, 1 ether);
+        assertEq(destination.balance, 1 ether);
     }
 
     function testRejectsActionsOtherThanSigned() public {
@@ -310,35 +310,35 @@ contract EthRescueTest is Test {
         _submit(request, _singleAction(address(recorder), 100_000, abi.encodeCall(recorder.record, ())));
     }
 
-    function testRejectsSafeOtherThanSigned() public {
+    function testRejectsDestinationOtherThanSigned() public {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
-        bytes memory signature = _sign(VICTIM_KEY, victim, request);
-        request.safe = makeAddr("attacker-safe");
+        bytes memory signature = _sign(COMPROMISED_KEY, compromised, request);
+        request.destination = makeAddr("attacker-destination");
 
         vm.expectRevert(EthRescue.InvalidSignature.selector);
         _submit(request, _emptyActions(), signature);
     }
 
-    function testRejectsInvalidSafe() public {
+    function testRejectsInvalidDestination() public {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
-        address[3] memory invalid = [address(0), rescuer, victim];
+        address[3] memory invalid = [address(0), rescuer, compromised];
         for (uint256 i; i < invalid.length; ++i) {
-            request.safe = invalid[i];
-            vm.expectRevert(EthRescue.InvalidSafe.selector);
+            request.destination = invalid[i];
+            vm.expectRevert(EthRescue.InvalidDestination.selector);
             _submit(request, _emptyActions());
         }
     }
 
     function testReplayBeforeDeadlineOnlyRepeatsTheSignedSweep() public {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
-        bytes memory signature = _sign(VICTIM_KEY, victim, request);
+        bytes memory signature = _sign(COMPROMISED_KEY, compromised, request);
 
-        vm.deal(victim, 1 ether);
+        vm.deal(compromised, 1 ether);
         _submit(request, _emptyActions(), signature);
-        vm.deal(victim, 2 ether);
+        vm.deal(compromised, 2 ether);
         _submit(request, _emptyActions(), signature);
 
-        assertEq(safe.balance, 3 ether);
+        assertEq(destination.balance, 3 ether);
     }
 
     function testTargetCannotReenterRescue() public {
@@ -360,7 +360,7 @@ contract EthRescueTest is Test {
         actions[0] = _action(address(burner), 30_000, abi.encodeCall(burner.burn, ()));
         actions[1] = _action(address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
         EthRescue.RescueRequest memory request = _request(actions);
-        bytes memory signature = _sign(VICTIM_KEY, victim, request);
+        bytes memory signature = _sign(COMPROMISED_KEY, compromised, request);
 
         vm.prank(rescuer);
         delegated.rescue{gas: 500_000}(request, actions, signature);
@@ -391,7 +391,7 @@ contract EthRescueTest is Test {
         assertFalse(delegated.supportsInterface(0xffffffff));
     }
 
-    function testDelegatedVictimReceivesSafeTransferredTokens() public {
+    function testDelegatedCompromisedReceivesSafeTransferredTokens() public {
         address holder = makeAddr("holder");
         FixtureERC721 erc721 = new FixtureERC721();
         FixtureERC1155 erc1155 = new FixtureERC1155();
@@ -401,10 +401,10 @@ contract EthRescueTest is Test {
         erc1155.mint(holder, 3, 5);
 
         vm.prank(holder);
-        erc721.safeTransferFrom(holder, victim, 1, "erc721");
+        erc721.safeTransferFrom(holder, compromised, 1, "erc721");
 
         vm.prank(holder);
-        erc1155.safeTransferFrom(holder, victim, 1, 3, "erc1155");
+        erc1155.safeTransferFrom(holder, compromised, 1, 3, "erc1155");
 
         uint256[] memory tokenIds = new uint256[](2);
         tokenIds[0] = 2;
@@ -413,20 +413,20 @@ contract EthRescueTest is Test {
         amounts[0] = 4;
         amounts[1] = 5;
         vm.prank(holder);
-        erc1155.safeBatchTransferFrom(holder, victim, tokenIds, amounts, "batch");
+        erc1155.safeBatchTransferFrom(holder, compromised, tokenIds, amounts, "batch");
 
-        assertEq(erc721.ownerOf(1), victim);
-        assertEq(erc1155.balanceOf(victim, 1), 3);
-        assertEq(erc1155.balanceOf(victim, 2), 4);
-        assertEq(erc1155.balanceOf(victim, 3), 5);
+        assertEq(erc721.ownerOf(1), compromised);
+        assertEq(erc1155.balanceOf(compromised, 1), 3);
+        assertEq(erc1155.balanceOf(compromised, 2), 4);
+        assertEq(erc1155.balanceOf(compromised, 3), 5);
     }
 
-    function testActionCallsOriginateFromVictim() public {
+    function testActionCallsOriginateFromCompromised() public {
         CallRecorder target = new CallRecorder();
 
         _rescue(_singleAction(address(target), 100_000, abi.encodeCall(target.record, ())));
 
-        assertEq(target.caller(), victim);
+        assertEq(target.caller(), compromised);
         assertEq(target.calls(), 1);
     }
 
@@ -434,26 +434,26 @@ contract EthRescueTest is Test {
         FixtureERC20 erc20 = new FixtureERC20();
         FixtureERC721 erc721 = new FixtureERC721();
         FixtureERC1155 erc1155 = new FixtureERC1155();
-        FixtureOwnable ownable = new FixtureOwnable(victim);
-        erc20.mint(victim, 1_000);
-        erc721.mint(victim, 1);
-        erc1155.mint(victim, 1, 25);
+        FixtureOwnable ownable = new FixtureOwnable(compromised);
+        erc20.mint(compromised, 1_000);
+        erc721.mint(compromised, 1);
+        erc1155.mint(compromised, 1, 25);
 
         EthRescue.Action[] memory actions = new EthRescue.Action[](4);
-        actions[0] = _action(address(erc20), 100_000, abi.encodeCall(erc20.transfer, (safe, 1_000)));
-        actions[1] = _action(address(erc721), 100_000, abi.encodeCall(erc721.transferFrom, (victim, safe, 1)));
+        actions[0] = _action(address(erc20), 100_000, abi.encodeCall(erc20.transfer, (destination, 1_000)));
+        actions[1] = _action(address(erc721), 100_000, abi.encodeCall(erc721.transferFrom, (compromised, destination, 1)));
         actions[2] =
-            _action(address(erc1155), 150_000, abi.encodeCall(erc1155.safeTransferFrom, (victim, safe, 1, 25, "")));
-        actions[3] = _action(address(ownable), 100_000, abi.encodeCall(ownable.transferOwnership, (safe)));
+            _action(address(erc1155), 150_000, abi.encodeCall(erc1155.safeTransferFrom, (compromised, destination, 1, 25, "")));
+        actions[3] = _action(address(ownable), 100_000, abi.encodeCall(ownable.transferOwnership, (destination)));
 
         _rescue(actions);
 
-        assertEq(erc20.balanceOf(victim), 0);
-        assertEq(erc20.balanceOf(safe), 1_000);
-        assertEq(erc721.ownerOf(1), safe);
-        assertEq(erc1155.balanceOf(victim, 1), 0);
-        assertEq(erc1155.balanceOf(safe, 1), 25);
-        assertEq(ownable.owner(), safe);
+        assertEq(erc20.balanceOf(compromised), 0);
+        assertEq(erc20.balanceOf(destination), 1_000);
+        assertEq(erc721.ownerOf(1), destination);
+        assertEq(erc1155.balanceOf(compromised, 1), 0);
+        assertEq(erc1155.balanceOf(destination, 1), 25);
+        assertEq(ownable.owner(), destination);
     }
 
     function testRevertingActionDoesNotStopLaterActions() public {
@@ -477,11 +477,11 @@ contract EthRescueTest is Test {
         actions[1] = _action(address(falseReturning), 100_000, abi.encodeCall(falseReturning.returnFalse, ()));
         actions[2] = _action(address(noReturn), 100_000, abi.encodeCall(noReturn.run, ()));
 
-        vm.expectEmit(true, false, false, true, victim);
+        vm.expectEmit(true, false, false, true, compromised);
         emit EthRescue.ActionResult(0, false);
-        vm.expectEmit(true, false, false, true, victim);
+        vm.expectEmit(true, false, false, true, compromised);
         emit EthRescue.ActionResult(1, true); // EVM success only; protocol failure is the client's state check
-        vm.expectEmit(true, false, false, true, victim);
+        vm.expectEmit(true, false, false, true, compromised);
         emit EthRescue.ActionResult(2, true);
         _rescue(actions);
 
@@ -496,7 +496,7 @@ contract EthRescueTest is Test {
         actions[1] = _action(address(recorder), 100_000, abi.encodeCall(recorder.record, ()));
         actions[2] = _action(makeAddr("eoa"), 100_000, abi.encodeCall(recorder.record, ()));
         EthRescue.RescueRequest memory request = _request(actions);
-        bytes memory signature = _sign(VICTIM_KEY, victim, request);
+        bytes memory signature = _sign(COMPROMISED_KEY, compromised, request);
 
         vm.prank(rescuer);
         bool[] memory results = delegated.rescue(request, actions, signature);
@@ -510,7 +510,7 @@ contract EthRescueTest is Test {
     function testCodelessTargetIsReportedAsFailure() public {
         address eoa = makeAddr("eoa");
 
-        vm.expectEmit(true, false, false, true, victim);
+        vm.expectEmit(true, false, false, true, compromised);
         emit EthRescue.ActionResult(0, false);
         _rescue(_singleAction(eoa, 100_000, ""));
     }
@@ -524,7 +524,7 @@ contract EthRescueTest is Test {
         vm.expectRevert(abi.encodeWithSelector(EthRescue.InvalidAction.selector, 1));
         _rescue(actions);
 
-        actions[1].target = victim;
+        actions[1].target = compromised;
         vm.expectRevert(abi.encodeWithSelector(EthRescue.InvalidAction.selector, 1));
         _rescue(actions);
 
@@ -536,55 +536,55 @@ contract EthRescueTest is Test {
         assertEq(recorder.calls(), 0);
     }
 
-    function testVictimAcceptsRefundAndSweepsItAfterActions() public {
+    function testCompromisedAcceptsRefundAndSweepsItAfterActions() public {
         RefundTarget target = new RefundTarget();
         vm.deal(address(target), 2 ether);
 
         _rescue(_singleAction(address(target), 200_000, abi.encodeCall(target.refund, ())));
 
-        assertEq(target.caller(), victim);
-        assertEq(victim.balance, 0);
-        assertEq(safe.balance, 2 ether);
+        assertEq(target.caller(), compromised);
+        assertEq(compromised.balance, 0);
+        assertEq(destination.balance, 2 ether);
     }
 
-    function testDelegatedVictimCanReceivePlainEthBeforeRescue() public {
+    function testDelegatedCompromisedCanReceivePlainEthBeforeRescue() public {
         address sender = makeAddr("sender");
         vm.deal(sender, 1 ether);
 
         vm.prank(sender);
-        (bool success,) = victim.call{value: 1 ether}("");
+        (bool success,) = compromised.call{value: 1 ether}("");
 
         assertTrue(success);
-        assertEq(victim.balance, 1 ether);
+        assertEq(compromised.balance, 1 ether);
         _rescue(_emptyActions());
-        assertEq(safe.balance, 1 ether);
+        assertEq(destination.balance, 1 ether);
     }
 
-    function testZeroBalanceDoesNotCallRejectingSafe() public {
+    function testZeroBalanceDoesNotCallRejectingDestination() public {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
-        request.safe = address(new RejectingSafe());
+        request.destination = address(new RejectingDestination());
 
         _submit(request, _emptyActions());
     }
 
-    function testRejectingSafeRevertsPositiveSweep() public {
+    function testRejectingDestinationRevertsPositiveSweep() public {
         EthRescue.RescueRequest memory request = _request(_emptyActions());
-        request.safe = address(new RejectingSafe());
-        vm.deal(victim, 1 ether);
+        request.destination = address(new RejectingDestination());
+        vm.deal(compromised, 1 ether);
 
         vm.expectRevert(EthRescue.EthTransferFailed.selector);
         _submit(request, _emptyActions());
 
-        assertEq(victim.balance, 1 ether);
+        assertEq(compromised.balance, 1 ether);
     }
 
     function testFuzzSweepsFullBalance(uint96 amount) public {
-        vm.deal(victim, amount);
+        vm.deal(compromised, amount);
 
         _rescue(_emptyActions());
 
-        assertEq(victim.balance, 0);
-        assertEq(safe.balance, amount);
+        assertEq(compromised.balance, 0);
+        assertEq(destination.balance, amount);
     }
 
     function testFuzzExecutesEveryValidAction(uint8 rawCount) public {
@@ -609,7 +609,7 @@ contract EthRescueTest is Test {
     }
 
     function _submit(EthRescue.RescueRequest memory request, EthRescue.Action[] memory actions) private {
-        _submit(request, actions, _sign(VICTIM_KEY, victim, request));
+        _submit(request, actions, _sign(COMPROMISED_KEY, compromised, request));
     }
 
     function _submit(EthRescue.RescueRequest memory request, EthRescue.Action[] memory actions, bytes memory signature)
@@ -622,7 +622,7 @@ contract EthRescueTest is Test {
     function _request(EthRescue.Action[] memory actions) private view returns (EthRescue.RescueRequest memory) {
         return EthRescue.RescueRequest({
             rescuer: rescuer,
-            safe: safe,
+            destination: destination,
             deadline: block.timestamp + 1 hours,
             actionsHash: keccak256(abi.encode(actions))
         });
@@ -641,9 +641,9 @@ contract EthRescueTest is Test {
         );
         bytes32 structHash = keccak256(
             abi.encode(
-                keccak256("RescueRequest(address rescuer,address safe,uint256 deadline,bytes32 actionsHash)"),
+                keccak256("RescueRequest(address rescuer,address destination,uint256 deadline,bytes32 actionsHash)"),
                 request.rescuer,
-                request.safe,
+                request.destination,
                 request.deadline,
                 request.actionsHash
             )

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { looksLikeSecret } from "../src/plan/address";
 import { draftReducer, emptyDraft, fromPlan, newAction, PlanImportError, toPlan } from "../src/plan/draft";
 
-const SAFE = "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1";
+const DESTINATION = "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1";
 
 function withActions(count: number) {
   const draft = emptyDraft();
@@ -27,12 +27,12 @@ test("move swaps neighbours and ignores moves past either end", () => {
 
 test("toPlan checksums lowercase addresses and omits empty optional fields", () => {
   const draft = emptyDraft();
-  draft.safe = SAFE.toLowerCase();
-  draft.actions = [{ ...newAction("erc721"), contract: SAFE.toLowerCase(), token_id: "7", label: "  " }];
+  draft.destination = DESTINATION.toLowerCase();
+  draft.actions = [{ ...newAction("erc721"), contract: DESTINATION.toLowerCase(), token_id: "7", label: "  " }];
   const plan = toPlan(draft);
-  expect(plan.safe).toBe(SAFE);
+  expect(plan.destination).toBe(DESTINATION);
   expect(plan).not.toHaveProperty("gas_wallet");
-  expect(plan.actions).toEqual([{ type: "erc721", contract: SAFE, token_id: "7" }]);
+  expect(plan.actions).toEqual([{ type: "erc721", contract: DESTINATION, token_id: "7" }]);
 });
 
 test("custom args become JSON values by parameter type", () => {
@@ -40,7 +40,7 @@ test("custom args become JSON values by parameter type", () => {
   draft.actions = [
     {
       ...newAction("custom"),
-      target: SAFE,
+      target: DESTINATION,
       signature: "f(string,bool,uint256[],uint256)",
       args: ["[not json", "true", "[1, 2]", "5"],
       gas: "90000",
@@ -72,7 +72,7 @@ test("secrets are recognised", () => {
   expect(looksLikeSecret("ab".repeat(32))).toBe(true);
   expect(looksLikeSecret(`0x${"ab".repeat(32)}`)).toBe(true);
   expect(looksLikeSecret(Array(12).fill("abandon").join(" "))).toBe(true);
-  expect(looksLikeSecret(SAFE)).toBe(false);
+  expect(looksLikeSecret(DESTINATION)).toBe(false);
 });
 
 test("looksLikeSecret finds keys and seed phrases inside other text", () => {

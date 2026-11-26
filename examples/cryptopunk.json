@@ -1,16 +1,13 @@
 {
   "version": 1,
   "network": "mainnet",
-  "victim": "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61",
-  "safe": "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1",
+  "compromised": "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61",
+  "destination": "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1",
   "actions": [
     {
-      "type": "custom",
+      "type": "cryptopunk",
       "label": "CryptoPunk #78",
-      "target": "0xb47e3cd837dDF8e4c57F05d70Ab865de6e193BBB",
-      "signature": "transferPunk(address,uint256)",
-      "args": ["0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1", "78"],
-      "gas": 75000
+      "token_id": "78"
     }
   ]
 }

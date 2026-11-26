@@ -5,7 +5,7 @@ import pytest
 
 from eth_rescue.calldata import CalldataError, build_calldata, canonical_signature
 
-SAFE = "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1"
+DESTINATION = "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1"
 VECTORS = json.loads(
     (Path(__file__).parent / "fixtures" / "abi_vectors.json").read_text()
 )
@@ -32,14 +32,14 @@ def test_shared_vector_is_rejected(vector):
 
 def test_build_calldata_matches_known_erc20_transfer():
     assert (
-        build_calldata("transfer(address,uint256)", [SAFE, 1000])
+        build_calldata("transfer(address,uint256)", [DESTINATION, 1000])
         == "0xa9059cbb00000000000000000000000074a7b842fdeb244c152aa5bc8b7fbae362091ee100000000000000000000000000000000000000000000000000000000000003e8"
     )
 
 
 def test_alias_is_rejected_with_the_canonical_form():
     with pytest.raises(CalldataError, match=r"use transferPunk\(address,uint256\)"):
-        build_calldata("transferPunk(address,uint)", [SAFE, "1"])
+        build_calldata("transferPunk(address,uint)", [DESTINATION, "1"])
 
 
 def test_canonical_signature_expands_aliases_and_nested_types():
@@ -50,4 +50,4 @@ def test_canonical_signature_expands_aliases_and_nested_types():
 
 def test_error_names_the_offending_argument():
     with pytest.raises(CalldataError, match=r"args\[1\]\[0\]\[1\]"):
-        build_calldata("f(uint256,(address,uint256)[])", ["1", [[SAFE, "x"]]])
+        build_calldata("f(uint256,(address,uint256)[])", ["1", [[DESTINATION, "x"]]])

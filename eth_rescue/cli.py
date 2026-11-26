@@ -93,10 +93,10 @@ def _validate(args: argparse.Namespace) -> int:
     except PlanError as e:
         reporter.message("error", f"Invalid plan {args.plan}:\n{e}")
         return ExitCode.INVALID
-    reporter.message("info", f"Network:    {plan.network}")
-    reporter.message("info", f"Victim:     {plan.victim}")
-    reporter.message("info", f"Safe:       {plan.safe}")
-    reporter.message("info", f"Gas wallet: {plan.gas_wallet or '(not set)'}")
+    reporter.message("info", f"Network:            {plan.network}")
+    reporter.message("info", f"Compromised wallet: {plan.compromised}")
+    reporter.message("info", f"Destination wallet: {plan.destination}")
+    reporter.message("info", f"Gas wallet:         {plan.gas_wallet or '(not set)'}")
     reporter.message(
         "info", f"Extra priority fee: {plan.options.priority_fee_gwei} gwei"
     )
@@ -203,11 +203,11 @@ def _read_key(label: str) -> LocalAccount:
 def read_accounts(plan: Plan) -> tuple[LocalAccount, LocalAccount]:
     if not sys.stdin.isatty():
         raise CliError("private keys are entered at a hidden prompt; run in a terminal")
-    victim = _read_key("Compromised wallet")
-    if victim.address != plan.victim:
+    compromised = _read_key("Compromised wallet")
+    if compromised.address != plan.compromised:
         raise CliError(
-            f"compromised wallet key is for {victim.address}, "
-            f"but the plan's victim is {plan.victim}"
+            f"compromised wallet key is for {compromised.address}, "
+            f"but the plan's compromised wallet is {plan.compromised}"
         )
     gas = _read_key("Gas wallet")
     if plan.gas_wallet is not None and gas.address != plan.gas_wallet:
@@ -215,9 +215,11 @@ def read_accounts(plan: Plan) -> tuple[LocalAccount, LocalAccount]:
             f"gas wallet key is for {gas.address}, "
             f"but the plan's gas_wallet is {plan.gas_wallet}"
         )
-    if gas.address in (plan.victim, plan.safe):
-        raise CliError("gas wallet must differ from the victim and safe wallets")
-    return victim, gas
+    if gas.address in (plan.compromised, plan.destination):
+        raise CliError(
+            "gas wallet must differ from the compromised and destination wallets"
+        )
+    return compromised, gas
 
 
 def _confirm() -> bool:
@@ -256,12 +258,12 @@ def _context(
     # A throwaway relay identity: Flashbots reputation is not worth linking runs.
     w3 = connect(network, Account.create(), rpc=args.rpc or None)
     reporter.message("info", f"Connected to {network['label']}.")
-    victim, gas = read_accounts(plan)
+    compromised, gas = read_accounts(plan)
     return plan, RescueContext(
         w3=w3,
-        victim=victim,
+        compromised=compromised,
         gas=gas,
-        safe=plan.safe,
+        destination=plan.destination,
         reporter=reporter,
         rescue_contract=network["eth_rescue"],
         rescue_codehash=network["eth_rescue_codehash"],

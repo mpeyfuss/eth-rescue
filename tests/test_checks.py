@@ -6,7 +6,7 @@ from web3.exceptions import ContractLogicError
 
 from eth_rescue import checks, templates
 
-SAFE = "0x000000000000000000000000000000000000BEEF"
+DESTINATION = "0x000000000000000000000000000000000000BEEF"
 OTHER = "0x000000000000000000000000000000000000dEaD"
 TOKEN = "0x0000000000000000000000000000000000000001"
 BLOCK = 123
@@ -35,6 +35,7 @@ class FakeChain:
             ownerOf=lambda token_id: self._fn("ownerOf", token_id),
             owner=lambda: self._fn("owner"),
             pendingOwner=lambda: self._fn("pendingOwner"),
+            punkIndexToAddress=lambda index: self._fn("punkIndexToAddress", index),
         )
         return SimpleNamespace(functions=functions)
 
@@ -62,24 +63,27 @@ def _key(data):
 
 
 def test_infer_check_reads_the_template_declaration():
-    assert checks.infer_check(templates.erc20_transfer(TOKEN, SAFE, 5)).kind == "erc20"
     assert (
-        checks.infer_check(templates.erc721_transfer(TOKEN, OTHER, SAFE, 9)).kind
+        checks.infer_check(templates.erc20_transfer(TOKEN, DESTINATION, 5)).kind
+        == "erc20"
+    )
+    assert (
+        checks.infer_check(templates.erc721_transfer(TOKEN, OTHER, DESTINATION, 9)).kind
         == "erc721"
     )
-    assert checks.infer_check(templates.transfer_ownership(TOKEN, SAFE)).kind == (
-        "ownership"
-    )
+    assert checks.infer_check(
+        templates.transfer_ownership(TOKEN, DESTINATION)
+    ).kind == ("ownership")
 
 
 def test_custom_call_with_a_typed_signature_has_no_check():
-    data = templates.custom(TOKEN, "transfer(address,uint256)", [SAFE, 5])
+    data = templates.custom(TOKEN, "transfer(address,uint256)", [DESTINATION, 5])
 
     assert checks.infer_check(data) is None
 
 
 def test_erc20_uses_snapshot_delta_read_at_inclusion_block():
-    data = templates.erc20_transfer(TOKEN, SAFE, 100)
+    data = templates.erc20_transfer(TOKEN, DESTINATION, 100)
     w3, chain = _w3({"balanceOf": 250})
 
     [outcome] = _evaluate(w3, [data], {_key(data): 200})
@@ -94,8 +98,8 @@ def test_erc20_uses_snapshot_delta_read_at_inclusion_block():
 
 
 def test_shared_balance_increase_is_claimed_once_in_execution_order():
-    first = templates.erc20_transfer(TOKEN, SAFE, 100)
-    second = templates.erc20_transfer(TOKEN, SAFE, 100)
+    first = templates.erc20_transfer(TOKEN, DESTINATION, 100)
+    second = templates.erc20_transfer(TOKEN, DESTINATION, 100)
     w3, _chain = _w3({"balanceOf": 1_100})
 
     outcomes = _evaluate(w3, [first, second], {_key(first): 1_000})
@@ -104,7 +108,7 @@ def test_shared_balance_increase_is_claimed_once_in_execution_order():
 
 
 def test_unreadable_snapshot_makes_balance_action_unverified():
-    data = templates.erc20_transfer(TOKEN, SAFE, 100)
+    data = templates.erc20_transfer(TOKEN, DESTINATION, 100)
     w3, _chain = _w3({"balanceOf": 300})
 
     [outcome] = _evaluate(w3, [data], {_key(data): None})
@@ -113,7 +117,7 @@ def test_unreadable_snapshot_makes_balance_action_unverified():
 
 
 def test_snapshot_records_none_when_balance_unreadable():
-    data = templates.erc20_transfer(TOKEN, SAFE, 100)
+    data = templates.erc20_transfer(TOKEN, DESTINATION, 100)
 
     def down(*_args):
         raise ConnectionError("rpc down")
@@ -126,17 +130,36 @@ def test_snapshot_records_none_when_balance_unreadable():
 
 
 def test_erc721_checks_owner():
-    data = templates.erc721_transfer(TOKEN, OTHER, SAFE, 9)
+    data = templates.erc721_transfer(TOKEN, OTHER, DESTINATION, 9)
 
-    w3, _chain = _w3({"ownerOf": SAFE})
+    w3, _chain = _w3({"ownerOf": DESTINATION})
     assert _evaluate(w3, [data], {})[0].status == "rescued"
 
     w3, _chain = _w3({"ownerOf": OTHER})
     assert _evaluate(w3, [data], {})[0].status == "failed"
 
 
+def test_cryptopunk_checks_punk_index_to_address():
+    data = templates.cryptopunk_transfer(TOKEN, DESTINATION, 78)
+
+    w3, chain = _w3({"punkIndexToAddress": DESTINATION})
+    assert _evaluate(w3, [data], {})[0].status == "rescued"
+    assert chain.calls == [("punkIndexToAddress", (78,))]
+
+    w3, _chain = _w3({"punkIndexToAddress": OTHER})
+    assert _evaluate(w3, [data], {})[0].status == "failed"
+
+
+def test_superrare_v1_checks_owner_of():
+    data = templates.superrare_v1_transfer(TOKEN, DESTINATION, 43)
+
+    w3, chain = _w3({"ownerOf": DESTINATION})
+    assert _evaluate(w3, [data], {})[0].status == "rescued"
+    assert chain.calls == [("ownerOf", (43,))]
+
+
 def test_owner_read_revert_is_failure_but_rpc_error_is_unverified():
-    data = templates.transfer_ownership(TOKEN, SAFE)
+    data = templates.transfer_ownership(TOKEN, DESTINATION)
 
     def reverts():
         raise ContractLogicError("execution reverted")
@@ -153,8 +176,8 @@ def test_owner_read_revert_is_failure_but_rpc_error_is_unverified():
 
 
 def test_read_retries_transient_errors():
-    data = templates.transfer_ownership(TOKEN, SAFE)
-    answers = iter([ConnectionError("blip"), SAFE])
+    data = templates.transfer_ownership(TOKEN, DESTINATION)
+    answers = iter([ConnectionError("blip"), DESTINATION])
 
     def flaky():
         answer = next(answers)
@@ -186,9 +209,11 @@ def test_call_result_decides_status_before_any_check(executed, status):
     assert chain.blocks == []
 
 
-@pytest.mark.parametrize(("owner", "status"), [(SAFE, "rescued"), (OTHER, "failed")])
+@pytest.mark.parametrize(
+    ("owner", "status"), [(DESTINATION, "rescued"), (OTHER, "failed")]
+)
 def test_unknown_call_result_is_judged_by_the_check(owner, status):
-    data = templates.erc721_transfer(TOKEN, OTHER, SAFE, 9)
+    data = templates.erc721_transfer(TOKEN, OTHER, DESTINATION, 9)
     w3, chain = _w3({"ownerOf": owner})
 
     [outcome] = _evaluate(w3, [data], {}, {0: "unknown"})
@@ -198,7 +223,7 @@ def test_unknown_call_result_is_judged_by_the_check(owner, status):
 
 
 def test_reverted_typed_action_is_failed_without_reading_state():
-    data = templates.erc20_transfer(TOKEN, SAFE, 100)
+    data = templates.erc20_transfer(TOKEN, DESTINATION, 100)
     w3, chain = _w3({"balanceOf": 10**9})
 
     [outcome] = _evaluate(w3, [data], {_key(data): 0}, {0: False})
@@ -209,7 +234,7 @@ def test_reverted_typed_action_is_failed_without_reading_state():
 
 def test_unknown_check_kind_is_unverified_not_a_crash():
     w3, _chain = _w3({})
-    check = checks.Check(kind="erc404", contract=TOKEN, recipient=SAFE)
+    check = checks.Check(kind="erc404", contract=TOKEN, recipient=DESTINATION)
 
     [outcome] = checks.evaluate_checks(
         w3, {0: check}, {}, {0: True}, BLOCK, sleep=_no_sleep
@@ -218,9 +243,9 @@ def test_unknown_check_kind_is_unverified_not_a_crash():
     assert outcome.status == "unverified"
 
 
-def test_ownable2step_pending_safe_is_partial_with_instructions():
-    data = templates.transfer_ownership(TOKEN, SAFE)
-    w3, _chain = _w3({"owner": OTHER, "pendingOwner": SAFE})
+def test_ownable2step_pending_destination_is_partial_with_instructions():
+    data = templates.transfer_ownership(TOKEN, DESTINATION)
+    w3, _chain = _w3({"owner": OTHER, "pendingOwner": DESTINATION})
 
     [outcome] = _evaluate(w3, [data], {})
 
@@ -229,13 +254,13 @@ def test_ownable2step_pending_safe_is_partial_with_instructions():
 
 
 @pytest.mark.parametrize("pending", [OTHER, ContractLogicError("no such function")])
-def test_ownership_without_pending_safe_is_failed(pending):
+def test_ownership_without_pending_destination_is_failed(pending):
     def read():
         if isinstance(pending, Exception):
             raise pending
         return pending
 
-    data = templates.transfer_ownership(TOKEN, SAFE)
+    data = templates.transfer_ownership(TOKEN, DESTINATION)
     w3, _chain = _w3({"owner": OTHER, "pendingOwner": read})
 
     [outcome] = _evaluate(w3, [data], {})
@@ -244,19 +269,19 @@ def test_ownership_without_pending_safe_is_failed(pending):
     assert outcome.detail == f"owned by {OTHER}"
 
 
-def test_erc1155_reads_the_safe_balance_of_the_token_id():
-    data = templates.erc1155_transfer(TOKEN, OTHER, SAFE, 42, 5)
+def test_erc1155_reads_the_destination_balance_of_the_token_id():
+    data = templates.erc1155_transfer(TOKEN, OTHER, DESTINATION, 42, 5)
     w3, chain = _w3({"balanceOf": 5})
 
     [outcome] = _evaluate(w3, [data], {_key(data): 0})
 
     assert outcome.status == "rescued"
-    assert chain.calls == [("balanceOf", (to_checksum_address(SAFE), 42))]
+    assert chain.calls == [("balanceOf", (to_checksum_address(DESTINATION), 42))]
     assert chain.blocks == [BLOCK]
 
 
 def test_balance_unreadable_at_inclusion_block_is_unverified():
-    data = templates.erc20_transfer(TOKEN, SAFE, 100)
+    data = templates.erc20_transfer(TOKEN, DESTINATION, 100)
 
     def down(*_args):
         raise ConnectionError("rpc down")
@@ -269,7 +294,7 @@ def test_balance_unreadable_at_inclusion_block_is_unverified():
 
 
 def test_snapshot_reads_the_latest_block():
-    data = templates.erc20_transfer(TOKEN, SAFE, 100)
+    data = templates.erc20_transfer(TOKEN, DESTINATION, 100)
     w3, chain = _w3({"balanceOf": 7})
 
     snapshot = checks.snapshot_checks(w3, checks.infer_checks([data]), _no_sleep)

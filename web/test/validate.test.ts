@@ -1,16 +1,16 @@
 import { expect, test } from "bun:test";
 import { validatePlan } from "../src/plan/validate";
 
-const VICTIM = "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61";
-const SAFE = "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1";
-const TOKEN = "0x41A322b28D0fF354040e2CbC676F0320d8c8850d";
+const COMPROMISED = "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61";
+const DESTINATION = "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1";
+const TOKEN = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
 function plan(overrides: Record<string, unknown> = {}, action: Record<string, unknown> = {}) {
   return {
     version: 1,
     network: "mainnet",
-    victim: VICTIM,
-    safe: SAFE,
+    compromised: COMPROMISED,
+    destination: DESTINATION,
     actions: [{ type: "erc20", contract: TOKEN, amount: "1", ...action }],
     ...overrides,
   };
@@ -23,21 +23,21 @@ test("minimal plan is valid", () => {
 });
 
 test("lowercase addresses are accepted", () => {
-  expect(paths(plan({ victim: VICTIM.toLowerCase() }))).toEqual([]);
+  expect(paths(plan({ compromised: COMPROMISED.toLowerCase() }))).toEqual([]);
 });
 
 test("bad checksum is rejected", () => {
-  const badChecksum = VICTIM.replace("d068c6A6", "D068c6A6");
-  expect(paths(plan({ victim: badChecksum }))).toEqual(["victim: has an invalid checksum"]);
+  const badChecksum = COMPROMISED.replace("d068c6A6", "D068c6A6");
+  expect(paths(plan({ compromised: badChecksum }))).toEqual(["compromised: has an invalid checksum"]);
 });
 
-test("safe must differ from victim", () => {
-  expect(paths(plan({ safe: VICTIM.toLowerCase() }))).toEqual(["safe: must differ from the compromised wallet"]);
+test("destination must differ from the compromised wallet", () => {
+  expect(paths(plan({ destination: COMPROMISED.toLowerCase() }))).toEqual(["destination: must differ from the compromised wallet"]);
 });
 
-test("safe must not be the EthRescue contract", () => {
-  expect(paths(plan({ safe: "0xe9da4345f6ab43e05ff3de7999a99dc30710421a" }))).toEqual([
-    "safe: must not be the EthRescue contract: ETH sent there is lost",
+test("destination must not be the EthRescue contract", () => {
+  expect(paths(plan({ destination: "0xdc7ec38149c572a29ac89813eda47140ac8cd969" }))).toEqual([
+    "destination: must not be the EthRescue contract: ETH sent there is lost",
   ]);
 });
 
@@ -48,13 +48,15 @@ test("a non-canonical signature is reported on the signature, not its args", () 
   expect(issues[0]?.message).toContain("f(uint256)");
 });
 
-test("gas wallet must differ from victim and safe", () => {
-  expect(paths(plan({ gas_wallet: SAFE }))).toEqual(["gas_wallet: must differ from the compromised wallet and safe wallet"]);
+test("gas wallet must differ from the compromised and destination wallets", () => {
+  expect(paths(plan({ gas_wallet: DESTINATION }))).toEqual([
+    "gas_wallet: must differ from the compromised wallet and destination wallet",
+  ]);
 });
 
 test("missing fields and empty actions", () => {
-  expect(paths({ version: 1, network: "mainnet", victim: VICTIM, actions: [] })).toEqual([
-    "safe: is required",
+  expect(paths({ version: 1, network: "mainnet", compromised: COMPROMISED, actions: [] })).toEqual([
+    "destination: is required",
     "actions: needs at least one action",
   ]);
 });
@@ -92,18 +94,18 @@ const custom = (signature: string, args: unknown[]) =>
   plan({ actions: [{ type: "custom", target: TOKEN, signature, args, gas: 100000 }] });
 
 test("custom args are coerced like the CLI", () => {
-  expect(paths(custom("transferPunk(address,uint256)", [SAFE, "0x4e"]))).toEqual([]);
-  expect(paths(custom("f(uint256[],(address,bool),bytes)", [["1", 2], [SAFE, true], "0x1234"]))).toEqual([]);
+  expect(paths(custom("transferPunk(address,uint256)", [DESTINATION, "0x4e"]))).toEqual([]);
+  expect(paths(custom("f(uint256[],(address,bool),bytes)", [["1", 2], [DESTINATION, true], "0x1234"]))).toEqual([]);
 });
 
 test("custom arg count must match the signature", () => {
-  expect(paths(custom("transferPunk(address,uint256)", [SAFE]))).toEqual([
+  expect(paths(custom("transferPunk(address,uint256)", [DESTINATION]))).toEqual([
     "actions.0.args: transferPunk(address,uint256) expects 2 args, got 1",
   ]);
 });
 
 test("custom args that do not encode are rejected", () => {
-  const [issue] = validatePlan(custom("transferPunk(address,uint256)", [SAFE, "abc"]));
+  const [issue] = validatePlan(custom("transferPunk(address,uint256)", [DESTINATION, "abc"]));
   expect(issue.path).toBe("actions.0.args");
   expect(issue.message).toBe("args[1]: expected an integer or a decimal/0x string");
 });
@@ -122,13 +124,13 @@ test("an inherited object key is not an action type", () => {
 });
 
 test("field checks still run when the schema rejects something else", () => {
-  const issues = paths(plan({}, { contract: TOKEN.toLowerCase().replace("41a3", "41A3"), extra: 1 }));
+  const issues = paths(plan({}, { contract: TOKEN.toLowerCase().replace("a0b8", "A0b8"), extra: 1 }));
   expect(issues).toContain("actions.0.contract: has an invalid checksum");
   expect(issues).toContain("actions.0.extra: is not a known field");
 });
 
 test("the zero address and the compromised wallet are refused where EthRescue refuses them", () => {
   const zero = "0x0000000000000000000000000000000000000000";
-  expect(paths(plan({ safe: zero }))).toEqual(["safe: must not be the zero address"]);
-  expect(paths(plan({}, { contract: VICTIM }))).toEqual(["actions.0.contract: must not be the compromised wallet"]);
+  expect(paths(plan({ destination: zero }))).toEqual(["destination: must not be the zero address"]);
+  expect(paths(plan({}, { contract: COMPROMISED }))).toEqual(["actions.0.contract: must not be the compromised wallet"]);
 });

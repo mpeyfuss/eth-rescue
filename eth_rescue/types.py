@@ -5,7 +5,7 @@ from eth_utils import keccak
 from hexbytes import HexBytes
 
 
-CheckKind = Literal["erc20", "erc721", "erc1155", "ownership"]
+CheckKind = Literal["erc20", "erc721", "erc1155", "ownership", "cryptopunk"]
 
 
 class CheckSpec(TypedDict):
@@ -97,14 +97,14 @@ class BundleTransaction:
 @dataclass(frozen=True)
 class PreparedBundle:
     transactions: list[BundleTransaction]
-    victim_nonce: int
+    compromised_nonce: int
     gas_nonce: int
     priority_fee: int
     max_fee_per_gas: int
     effective_fee_cap: int
     target_block: int
     required_funding: int
-    victim_funding: int
+    compromised_funding: int
     sweep_value: int
     warnings: tuple[str, ...] = ()
     # Dry-run call result per action (unsigned eth_call), None where unavailable.

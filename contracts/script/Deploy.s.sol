@@ -9,9 +9,13 @@ interface ICreateX {
 }
 
 /// @notice Deploys EthRescue through CreateX at the same address on every chain, whoever sends it.
-/// @dev The salt's first 20 bytes are zero and byte 21 is 0x00, so CreateX guards it as
-///      `keccak256(abi.encode(SALT))`: no sender and no chain id. The address then depends only on the
-///      init code, which `foundry.toml` pins (compiler, EVM version, no metadata hash).
+/// @dev SALT is a fixed constant, laid out for CreateX: bytes 0-19 zero (anyone may deploy), byte 20
+///      0x00 (no chain id mixed in), bytes 21-31 the label "EthRescue". CreateX guards it as
+///      `keccak256(abi.encode(SALT))`, so the address depends only on the init code, which
+///      `foundry.toml` pins (compiler, EVM version, no metadata hash).
+///
+///      The salt never changes between versions: a new version has new init code, so it lands at a new
+///      address on its own. The version lives in EthRescue's EIP-712 domain instead.
 ///
 ///      Dry run:  forge script script/Deploy.s.sol --rpc-url <rpc>
 ///      Deploy:   forge script script/Deploy.s.sol --rpc-url <rpc> --account <keystore> --broadcast
@@ -23,7 +27,7 @@ contract Deploy is Script {
     /// @dev Runtime codehash of the canonical CreateX build (same on every chain). Only that factory
     ///      guarantees the address below holds exactly this init code.
     bytes32 internal constant CREATEX_CODEHASH = 0xbd8a7ea8cfca7b4e5f5041d7d4b17bc317c5ce42cfbc42066a00cf26b43eb53f;
-    bytes32 internal constant SALT = bytes32(abi.encodePacked(bytes20(0), bytes1(0x00), bytes11("EthRescueV1")));
+    bytes32 internal constant SALT = bytes32(abi.encodePacked(bytes20(0), bytes1(0x00), bytes11("EthRescue")));
 
     error CreateXMissing();
     error UnexpectedCreateX(bytes32 codehash);

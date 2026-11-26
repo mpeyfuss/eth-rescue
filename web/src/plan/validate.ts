@@ -1,6 +1,7 @@
 import Ajv2020, { type ErrorObject, type ValidateFunction } from "ajv/dist/2020";
 import schema from "../../../schema/plan.v1.schema.json";
 import { addressProblem, sameAddress } from "./address";
+import { COLLECTION_NAMES, collectionFor } from "./collections";
 import { customArgsProblem, signatureProblem } from "./custom";
 import { isAvailableNetwork, NETWORKS } from "./draft";
 import type { Plan } from "./types.gen";
@@ -12,7 +13,7 @@ export interface Issue {
 
 const MAX_UINT256 = 2n ** 256n - 1n;
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-const PLAN_ADDRESS_FIELDS = ["victim", "safe", "gas_wallet"];
+const PLAN_ADDRESS_FIELDS = ["compromised", "destination", "gas_wallet"];
 const ACTION_ADDRESS_FIELDS = ["contract", "auction_house", "target"];
 const ACTION_UINT_FIELDS = ["amount", "token_id"];
 
@@ -91,7 +92,7 @@ function addressIssue(value: unknown): string | null {
 
 // Field checks run even when the schema already failed elsewhere in the action,
 // so one error never hides another; a path the schema flagged is not repeated.
-function fieldIssues(action: Record<string, unknown>, prefix: string, victim: unknown, flagged: Issue[]): Issue[] {
+function fieldIssues(action: Record<string, unknown>, prefix: string, compromised: unknown, flagged: Issue[]): Issue[] {
   const issues: Issue[] = [];
   const add = (field: string, message: string) => {
     const path = joinPath(prefix, field);
@@ -100,7 +101,7 @@ function fieldIssues(action: Record<string, unknown>, prefix: string, victim: un
   for (const field of ACTION_ADDRESS_FIELDS) {
     const problem = addressIssue(action[field]);
     if (problem) add(field, problem);
-    else if (typeof action[field] === "string" && typeof victim === "string" && sameAddress(action[field], victim)) {
+    else if (typeof action[field] === "string" && typeof compromised === "string" && sameAddress(action[field], compromised)) {
       add(field, "must not be the compromised wallet");
     }
   }
@@ -119,13 +120,25 @@ function fieldIssues(action: Record<string, unknown>, prefix: string, victim: un
   return issues;
 }
 
-function actionIssues(action: unknown, index: number, victim: unknown): Issue[] {
+function collectionIssue(action: Record<string, unknown>, prefix: string, network: unknown): Issue[] {
+  if (!isAvailableNetwork(network)) return [];
+  const collection = collectionFor(network, action.contract);
+  if (!collection) return [];
+  return [
+    {
+      path: joinPath(prefix, "contract"),
+      message: `is ${COLLECTION_NAMES[collection]}, which needs its own action type; a standard ${action.type} transfer fails on it`,
+    },
+  ];
+}
+
+function actionIssues(action: unknown, index: number, compromised: unknown, network?: unknown): Issue[] {
   const prefix = `actions.${index}`;
   const type = isRecord(action) ? action.type : undefined;
   const validate = typeof type === "string" && Object.hasOwn(actionValidators, type) ? actionValidators[type] : undefined;
   if (!validate || !isRecord(action)) return [{ path: joinPath(prefix, "type"), message: "is not a known action type" }];
   const issues = schemaIssues(validate, action, prefix);
-  return [...issues, ...fieldIssues(action, prefix, victim, issues)];
+  return [...issues, ...fieldIssues(action, prefix, compromised, issues), ...collectionIssue(action, prefix, network)];
 }
 
 function walletIssues(plan: Record<string, unknown>, flagged: Issue[]): Issue[] {
@@ -136,14 +149,14 @@ function walletIssues(plan: Record<string, unknown>, flagged: Issue[]): Issue[] 
     if (problem) issues.push({ path: field, message: problem });
   }
   if (issues.length > 0 || flagged.some((issue) => PLAN_ADDRESS_FIELDS.includes(issue.path))) return issues;
-  const { victim, safe, gas_wallet } = plan as Pick<Plan, "victim" | "safe" | "gas_wallet">;
-  if (sameAddress(safe, victim)) issues.push({ path: "safe", message: "must differ from the compromised wallet" });
+  const { compromised, destination, gas_wallet } = plan as Pick<Plan, "compromised" | "destination" | "gas_wallet">;
+  if (sameAddress(destination, compromised)) issues.push({ path: "destination", message: "must differ from the compromised wallet" });
   const ethRescue = NETWORKS.find((network) => network.value === plan.network)?.ethRescue;
-  if (ethRescue && sameAddress(safe, ethRescue)) {
-    issues.push({ path: "safe", message: "must not be the EthRescue contract: ETH sent there is lost" });
+  if (ethRescue && sameAddress(destination, ethRescue)) {
+    issues.push({ path: "destination", message: "must not be the EthRescue contract: ETH sent there is lost" });
   }
-  if (gas_wallet && (sameAddress(gas_wallet, victim) || sameAddress(gas_wallet, safe))) {
-    issues.push({ path: "gas_wallet", message: "must differ from the compromised wallet and safe wallet" });
+  if (gas_wallet && (sameAddress(gas_wallet, compromised) || sameAddress(gas_wallet, destination))) {
+    issues.push({ path: "gas_wallet", message: "must differ from the compromised wallet and destination wallet" });
   }
   return issues;
 }
@@ -156,7 +169,7 @@ export function validatePlan(value: unknown): Issue[] {
   }
   issues.push(...walletIssues(value, issues));
   if (Array.isArray(value.actions)) {
-    issues.push(...value.actions.flatMap((action, index) => actionIssues(action, index, value.victim)));
+    issues.push(...value.actions.flatMap((action, index) => actionIssues(action, index, value.compromised, value.network)));
   }
   return issues;
 }

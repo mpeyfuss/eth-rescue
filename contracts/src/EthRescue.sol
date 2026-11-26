@@ -20,10 +20,9 @@ import {LibCall} from "solady-0.1.26/utils/LibCall.sol";
 ///      Gas: the contract never checks `gasleft()` and records failed actions instead of reverting, so
 ///      `eth_estimateGas` can return a limit at which actions silently run out of gas. Clients should
 ///      budget instead: per action, its stipend plus 1/63 (EIP-150 forwards the full stipend only
-///      while 64/63 of it remains), call overhead and calldata; plus fixed costs and the sweep. Keep
-///      every transaction within the EIP-7825 cap so no EIP-8037 state-gas reservoir is involved (if EIP-8037 goes through).
+///      while 64/63 of it remains), call overhead and calldata; plus fixed costs and the sweep.
 /// @author mpeyfuss
-/// @custom:version 1.0.0
+/// @custom:version 1
 contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
     /////////////////////////////////////////////////////////////////////
     // TYPES
@@ -36,13 +35,13 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
     }
 
     /// @param rescuer The only account that may submit this request.
-    /// @param safe Receives the native-currency sweep. Asset destinations live in action calldata.
+    /// @param destination Receives the native-currency sweep. Asset destinations live in action calldata.
     /// @param deadline Last valid `block.timestamp`. Replay before it is harmless: only `rescuer` can
-    ///        submit, and only to `safe`.
+    ///        submit, and only to `destination`.
     /// @param actionsHash `keccak256(abi.encode(actions))`.
     struct RescueRequest {
         address rescuer;
-        address safe;
+        address destination;
         uint256 deadline;
         bytes32 actionsHash;
     }
@@ -52,7 +51,7 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
     /////////////////////////////////////////////////////////////////////
 
     bytes32 public constant RESCUE_REQUEST_TYPEHASH =
-        keccak256("RescueRequest(address rescuer,address safe,uint256 deadline,bytes32 actionsHash)");
+        keccak256("RescueRequest(address rescuer,address destination,uint256 deadline,bytes32 actionsHash)");
 
     /////////////////////////////////////////////////////////////////////
     // EVENTS
@@ -70,7 +69,7 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
     error Expired();
     error ActionsMismatch();
     error InvalidSignature();
-    error InvalidSafe();
+    error InvalidDestination();
     error InvalidAction(uint256 index);
     error EthTransferFailed();
 
@@ -78,7 +77,11 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
     // FUNCTIONS
     /////////////////////////////////////////////////////////////////////
 
-    /// @dev Keep name and version under 32 bytes. Longer strings make `eip712Domain()` read them from
+    /// @dev The version is a plain integer (1, 2, 3, ...) and goes up with every new deployment. Under
+    ///      delegation the verifying contract is the account, not the singleton, so the version is what
+    ///      keeps one deployment's signatures from validating under another. Bump the version tag above
+    ///      and `EIP712_DOMAIN_VERSION` in `eth_rescue/contract.py` with it.
+    ///      Keep name and version under 32 bytes. Longer strings make `eip712Domain()` read them from
     ///      storage, which under delegation is the account's, not the singleton's.
     constructor() EIP712("EthRescue", "1") {}
 
@@ -110,7 +113,7 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
         return _hashTypedDataV4(
             keccak256(
                 abi.encode(
-                    RESCUE_REQUEST_TYPEHASH, request.rescuer, request.safe, request.deadline, request.actionsHash
+                    RESCUE_REQUEST_TYPEHASH, request.rescuer, request.destination, request.deadline, request.actionsHash
                 )
             )
         );
@@ -142,7 +145,7 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
             emit ActionResult(i, success);
         }
 
-        _sweepEth(request.safe);
+        _sweepEth(request.destination);
     }
 
     /////////////////////////////////////////////////////////////////////
@@ -155,8 +158,8 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
     {
         if (msg.sender != request.rescuer) revert NotRescuer();
         if (block.timestamp > request.deadline) revert Expired();
-        address safe = request.safe;
-        if (safe == address(0) || safe == request.rescuer || safe == address(this)) revert InvalidSafe();
+        address destination = request.destination;
+        if (destination == address(0) || destination == request.rescuer || destination == address(this)) revert InvalidDestination();
         if (keccak256(abi.encode(actions)) != request.actionsHash) revert ActionsMismatch();
         // Reverts with OpenZeppelin's ECDSA errors for malformed, wrong-length or high-s signatures.
         if (ECDSA.recoverCalldata(rescueRequestDigest(request), signature) != address(this)) revert InvalidSignature();
@@ -169,10 +172,10 @@ contract EthRescue is EIP712, IERC165, IERC721Receiver, IERC1155Receiver {
         (success,,) = LibCall.tryCall(action.target, 0, action.gasStipend, 0, action.data);
     }
 
-    function _sweepEth(address safe) private {
+    function _sweepEth(address destination) private {
         uint256 amount = address(this).balance;
         if (amount != 0) {
-            (bool success,) = safe.call{value: amount}("");
+            (bool success,) = destination.call{value: amount}("");
             if (!success) revert EthTransferFailed();
         }
     }

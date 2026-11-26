@@ -12,7 +12,7 @@ ACTIONS_TYPE = "(address,uint256,bytes)[]"
 RESCUE_SELECTOR = keccak(text=f"rescue({REQUEST_TYPE},{ACTIONS_TYPE},bytes)")[:4]
 ACTION_RESULT_TOPIC = keccak(text="ActionResult(uint256,bool)")
 RESCUE_REQUEST_TYPEHASH = keccak(
-    text="RescueRequest(address rescuer,address safe,uint256 deadline,bytes32 actionsHash)"
+    text="RescueRequest(address rescuer,address destination,uint256 deadline,bytes32 actionsHash)"
 )
 TYPEHASH_SELECTOR = keccak(text="RESCUE_REQUEST_TYPEHASH()")[:4]
 DELEGATION_DESIGNATOR_PREFIX = b"\xef\x01\x00"
@@ -22,7 +22,7 @@ EIP712_DOMAIN_VERSION = "1"
 RESCUE_REQUEST_TYPES = {
     "RescueRequest": [
         {"name": "rescuer", "type": "address"},
-        {"name": "safe", "type": "address"},
+        {"name": "destination", "type": "address"},
         {"name": "deadline", "type": "uint256"},
         {"name": "actionsHash", "type": "bytes32"},
     ]
@@ -36,12 +36,12 @@ class RescueContractError(ValueError):
 @dataclass(frozen=True)
 class RescueRequest:
     rescuer: str
-    safe: str
+    destination: str
     deadline: int
     actions_hash: bytes
 
     def as_tuple(self) -> tuple[str, str, int, bytes]:
-        return (self.rescuer, self.safe, self.deadline, self.actions_hash)
+        return (self.rescuer, self.destination, self.deadline, self.actions_hash)
 
 
 def runtime_codehash(code: bytes) -> str:
@@ -94,22 +94,25 @@ def actions_hash(prepared: list[PreparedAction]) -> bytes:
 
 
 def sign_rescue_request(
-    victim_key: bytes, chain_id: int, victim_address: str, request: RescueRequest
+    compromised_key: bytes,
+    chain_id: int,
+    compromised_address: str,
+    request: RescueRequest,
 ) -> bytes:
-    """EIP-712 signature by the victim key; the domain's verifying contract is
-    the victim itself, because rescue() runs as the victim's delegated code."""
+    """EIP-712 signature by the compromised wallet key; the domain's verifying contract is
+    the compromised wallet itself, because rescue() runs as the compromised wallet's delegated code."""
     signed = Account.sign_typed_data(
-        victim_key,
+        compromised_key,
         domain_data={
             "name": EIP712_DOMAIN_NAME,
             "version": EIP712_DOMAIN_VERSION,
             "chainId": chain_id,
-            "verifyingContract": victim_address,
+            "verifyingContract": compromised_address,
         },
         message_types=RESCUE_REQUEST_TYPES,
         message_data={
             "rescuer": request.rescuer,
-            "safe": request.safe,
+            "destination": request.destination,
             "deadline": request.deadline,
             "actionsHash": request.actions_hash,
         },

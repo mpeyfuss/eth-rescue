@@ -2,6 +2,17 @@ import type { Network, PlanAction } from "../plan/draft";
 
 export type CandidateGroup = "tokens" | "nfts" | "listings" | "contracts";
 
+export interface CandidateMeta {
+  decimals?: number;
+  symbol?: string;
+  tokenName?: string;
+  formattedAmount?: string;
+  collection?: string;
+  contractAddress?: string;
+  tokenId?: string;
+  spam?: boolean;
+}
+
 export interface Candidate {
   key: string;
   group: CandidateGroup;
@@ -13,6 +24,7 @@ export interface Candidate {
   preselect: boolean;
   // Set when the asset was found but this plan cannot rescue it.
   blockedReason?: string;
+  meta?: CandidateMeta;
 }
 
 export interface SourceError {
@@ -31,7 +43,7 @@ export type Warn = (message: string) => void;
 
 export interface ScanRequest {
   network: Network;
-  victim: string;
+  compromised: string;
   alchemyKey: string | null;
 }
 

@@ -64,8 +64,8 @@ async function fetchAll<T>(api: string, path: string, query: Record<string, stri
   return results;
 }
 
-export async function findUserIds(api: string, victim: string, warn?: Warn): Promise<number[]> {
-  const users = await fetchAll<TransientUser>(api, "users", { address: victim.toLowerCase() }, warn);
+export async function findUserIds(api: string, compromised: string, warn?: Warn): Promise<number[]> {
+  const users = await fetchAll<TransientUser>(api, "users", { address: compromised.toLowerCase() }, warn);
   return users.map((user) => user.id);
 }
 
@@ -115,9 +115,9 @@ function listingBlockedReason(listing: TransientListing, tokenId: string | null)
   return undefined;
 }
 
-export function listingCandidates(listings: TransientListing[], victim: string): Candidate[] {
+export function listingCandidates(listings: TransientListing[], compromised: string): Candidate[] {
   return listings
-    .filter((listing) => sameAddress(listing.seller_address.raw_address, victim))
+    .filter((listing) => sameAddress(listing.seller_address.raw_address, compromised))
     .map((listing) => {
       const token = listing.nft_token;
       const contract = getAddress(token.nft_contract.address.raw_address);
@@ -141,6 +141,11 @@ export function listingCandidates(listings: TransientListing[], victim: string):
         action,
         preselect: !blockedReason,
         blockedReason,
+        meta: {
+          collection: token.nft_contract.name,
+          contractAddress: contract,
+          tokenId: tokenId ?? undefined,
+        },
       };
     });
 }
@@ -148,7 +153,7 @@ export function listingCandidates(listings: TransientListing[], victim: string):
 export function contractCandidates(
   contracts: TransientContract[],
   owners: Map<string, string | null>,
-  victim: string,
+  compromised: string,
 ): Candidate[] {
   return contracts.map((item) => {
     const contract = getAddress(item.address.raw_address);
@@ -156,7 +161,7 @@ export function contractCandidates(
     const action = { type: "ownership" as const, contract, label: item.name };
     let blockedReason: string | undefined;
     if (owner === null) blockedReason = "Could not read owner() on-chain.";
-    else if (!sameAddress(owner, victim)) blockedReason = `Owned by ${owner}, not the compromised wallet.`;
+    else if (!sameAddress(owner, compromised)) blockedReason = `Owned by ${owner}, not the compromised wallet.`;
     return {
       key: actionKey(action),
       group: "contracts" as const,
@@ -166,6 +171,9 @@ export function contractCandidates(
       action,
       preselect: !blockedReason,
       blockedReason,
+      meta: {
+        contractAddress: contract,
+      },
     };
   });
 }

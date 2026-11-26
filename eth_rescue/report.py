@@ -17,13 +17,21 @@ class Reporter(Protocol):
     def plan(self, actions: list[RescueData]) -> None: ...
     def bundle(self, bundle: PreparedBundle) -> None: ...
     def funding(self, address: str, required: int, balance: int) -> None: ...
-    def simulation(self, result: SimulationResult) -> None: ...
+    # `recheck` marks the re-simulation of a bundle just before it is sent.
+    def simulation(
+        self, result: SimulationResult, bundle: PreparedBundle, recheck: bool
+    ) -> None: ...
     def submitting(self, first_block: int, last_block: int) -> None: ...
     def included(self, receipts: list[TxReceipt]) -> None: ...
+    # `interim` outcomes are followed by a combined report that includes them.
     def outcomes(
-        self, actions: list[RescueData], outcomes: list[ActionOutcome]
+        self,
+        actions: list[RescueData],
+        outcomes: list[ActionOutcome],
+        *,
+        interim: bool = False,
     ) -> None: ...
-    def final_state(self, victim_balance: int, delegation: str | None) -> None: ...
+    def final_state(self, compromised_balance: int, delegation: str | None) -> None: ...
     def waiting(self, text: str) -> AbstractContextManager[Any]: ...
 
 
@@ -39,10 +47,15 @@ def _json_safe(value: Any) -> Any:
 
 
 class RichReporter:
+    def __init__(self) -> None:
+        # Funding is polled every block; an unchanged status is printed once.
+        self._last_funding: str | None = None
+
     def message(self, level: Level, text: str) -> None:
         getattr(ui, level)(text)
 
     def phase(self, title: str) -> None:
+        self._last_funding = None
         ui.section(title)
 
     def plan(self, actions: list[RescueData]) -> None:
@@ -53,16 +66,25 @@ class RichReporter:
 
     def funding(self, address: str, required: int, balance: int) -> None:
         if balance >= required:
-            ui.success(f"Gas wallet funded ({ui.ether(balance)}).")
+            text = f"Gas wallet funded ({ui.ether(balance)})."
+        else:
+            text = (
+                f"Send at least {ui.ether(required - balance, round_up=True)} to "
+                f"{address}. It holds {ui.ether(balance)} of the "
+                f"{ui.ether(required, round_up=True)} needed. Waiting for it to arrive..."
+            )
+        if text == self._last_funding:
             return
-        ui.warning(
-            f"Send at least {ui.ether(required - balance)} to {address} "
-            f"(balance {ui.ether(balance)} / needs {ui.ether(required)}). "
-            "Re-checking every block."
-        )
+        self._last_funding = text
+        (ui.success if balance >= required else ui.warning)(text)
 
-    def simulation(self, result: SimulationResult) -> None:
-        ui.render_simulation_result(result)
+    def simulation(
+        self, result: SimulationResult, bundle: PreparedBundle, recheck: bool
+    ) -> None:
+        if recheck and not any(ui.simulation_errors(result)):
+            ui.success(f"Re-simulated for block {bundle.target_block}: still succeeds.")
+            return
+        ui.render_simulation_result(result, bundle)
 
     def submitting(self, first_block: int, last_block: int) -> None:
         ui.info(f"Submitting bundle for blocks {first_block}-{last_block} ...")
@@ -74,12 +96,17 @@ class RichReporter:
             ui.info(f"  {receipt['transactionHash'].to_0x_hex()}{status}")
 
     def outcomes(
-        self, actions: list[RescueData], outcomes: list[ActionOutcome]
+        self,
+        actions: list[RescueData],
+        outcomes: list[ActionOutcome],
+        *,
+        interim: bool = False,
     ) -> None:
-        ui.render_outcome_report(actions, outcomes)
+        if not interim:
+            ui.render_outcome_report(actions, outcomes)
 
-    def final_state(self, victim_balance: int, delegation: str | None) -> None:
-        ui.render_final_state(victim_balance, delegation)
+    def final_state(self, compromised_balance: int, delegation: str | None) -> None:
+        ui.render_final_state(compromised_balance, delegation)
 
     def waiting(self, text: str) -> AbstractContextManager[Any]:
         return ui.console.status(text)
@@ -136,8 +163,15 @@ class JsonReporter:
             funded=balance >= required,
         )
 
-    def simulation(self, result: SimulationResult) -> None:
-        self._emit("simulation", result=result)
+    def simulation(
+        self, result: SimulationResult, bundle: PreparedBundle, recheck: bool
+    ) -> None:
+        self._emit(
+            "simulation",
+            result=result,
+            target_block=bundle.target_block,
+            recheck=recheck,
+        )
 
     def submitting(self, first_block: int, last_block: int) -> None:
         self._emit("submitting", first_block=first_block, last_block=last_block)
@@ -151,10 +185,15 @@ class JsonReporter:
         )
 
     def outcomes(
-        self, actions: list[RescueData], outcomes: list[ActionOutcome]
+        self,
+        actions: list[RescueData],
+        outcomes: list[ActionOutcome],
+        *,
+        interim: bool = False,
     ) -> None:
         self._emit(
             "outcomes",
+            interim=interim,
             outcomes=[
                 {
                     "index": outcome.index,
@@ -168,11 +207,11 @@ class JsonReporter:
             ],
         )
 
-    def final_state(self, victim_balance: int, delegation: str | None) -> None:
+    def final_state(self, compromised_balance: int, delegation: str | None) -> None:
         self._emit(
             "final_state",
-            victim_balance=str(victim_balance),
-            victim_delegation=delegation,
+            compromised_balance=str(compromised_balance),
+            compromised_delegation=delegation,
         )
 
     def waiting(self, text: str) -> AbstractContextManager[Any]:

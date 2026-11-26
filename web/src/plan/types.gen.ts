@@ -5,16 +5,34 @@ export type JsonValue = unknown;
 export interface Plan {
   version: 1;
   network: "mainnet";
-  victim: string;
-  safe: string;
+  compromised: string;
+  destination: string;
   gas_wallet?: string | null;
   options?: Options;
   /**
    * @minItems 1
    */
   actions: [
-    Erc20Action | Erc721Action | Erc1155Action | OwnershipAction | TransientDelistErc721Action | CustomAction,
-    ...(Erc20Action | Erc721Action | Erc1155Action | OwnershipAction | TransientDelistErc721Action | CustomAction)[]
+    (
+      | Erc20Action
+      | Erc721Action
+      | Erc1155Action
+      | OwnershipAction
+      | TransientDelistErc721Action
+      | CryptoPunkAction
+      | SuperRareV1Action
+      | CustomAction
+    ),
+    ...(
+      | Erc20Action
+      | Erc721Action
+      | Erc1155Action
+      | OwnershipAction
+      | TransientDelistErc721Action
+      | CryptoPunkAction
+      | SuperRareV1Action
+      | CustomAction
+    )[]
   ];
 }
 export interface Options {
@@ -56,6 +74,18 @@ export interface TransientDelistErc721Action {
   type: "transient_delist_erc721";
   auction_house: string;
   contract: string;
+  token_id: string;
+}
+export interface CryptoPunkAction {
+  label?: string | null;
+  gas?: number | null;
+  type: "cryptopunk";
+  token_id: string;
+}
+export interface SuperRareV1Action {
+  label?: string | null;
+  gas?: number | null;
+  type: "superrare_v1";
   token_id: string;
 }
 export interface CustomAction {

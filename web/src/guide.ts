@@ -5,7 +5,7 @@ export type Os = "macos" | "linux" | "windows";
 export const CLI_VERSION = "1.0.0";
 export const CLI = `uvx eth-rescue@${CLI_VERSION}`;
 export const RUN_STEPS =
-  "asks for both private keys in a hidden prompt (nothing appears on screen as you type or paste—paste once and press Enter), shows what the plan will do, waits until the gas wallet holds enough ETH (it tells you how much), simulates the rescue, and asks once before sending. If any action fails in the bundle, it automatically retries it as a direct transaction without asking again.";
+  "asks for both private keys in a hidden prompt (nothing appears on screen as you type or paste, so paste once and press Enter), shows what the plan will do, waits until the gas wallet holds enough ETH (it tells you how much), simulates the rescue, and asks once before sending. If any action fails in the bundle, it automatically retries it as a direct transaction without asking again.";
 export const PLAN_FILE = "plan.json";
 
 export const COMMANDS = {

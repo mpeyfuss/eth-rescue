@@ -12,7 +12,7 @@ from eth_rescue.bundle import (
     _rescue_base_gas,
     prepare_actions,
     prepare_bundle,
-    safe_receive_gas,
+    destination_receive_gas,
 )
 from eth_rescue.engine import ExitCode
 
@@ -30,16 +30,27 @@ def _statuses(reporter):
     return [outcome.status for outcome in outcomes]
 
 
-def _asset_matrix(asset_contracts, victim, safe):
+def _asset_matrix(asset_contracts, compromised, destination):
     return [
-        templates.erc20_transfer(asset_contracts["erc20"].address, safe.address, 1_000),
+        templates.erc20_transfer(
+            asset_contracts["erc20"].address, destination.address, 1_000
+        ),
         templates.erc721_transfer(
-            asset_contracts["erc721"].address, victim.address, safe.address, 1
+            asset_contracts["erc721"].address,
+            compromised.address,
+            destination.address,
+            1,
         ),
         templates.erc1155_transfer(
-            asset_contracts["erc1155"].address, victim.address, safe.address, 7, 25
+            asset_contracts["erc1155"].address,
+            compromised.address,
+            destination.address,
+            7,
+            25,
         ),
-        templates.transfer_ownership(asset_contracts["ownable"].address, safe.address),
+        templates.transfer_ownership(
+            asset_contracts["ownable"].address, destination.address
+        ),
     ]
 
 
@@ -52,20 +63,26 @@ def test_run_rescues_asset_matrix_and_sweeps_all_eth(
     make_ctx,
     reporter,
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     gas_nonce = anvil_w3.eth.get_transaction_count(gas.address)
 
     result = engine.run(
-        make_ctx(victim, gas, safe),
-        _asset_matrix(asset_contracts, victim, safe),
+        make_ctx(compromised, gas, destination),
+        _asset_matrix(asset_contracts, compromised, destination),
         confirm=_confirm,
     )
 
     assert result == ExitCode.OK
-    assert asset_contracts["erc20"].functions.balanceOf(safe.address).call() == 1_000
-    assert asset_contracts["erc721"].functions.ownerOf(1).call() == safe.address
-    assert asset_contracts["erc1155"].functions.balanceOf(safe.address, 7).call() == 25
-    assert asset_contracts["ownable"].functions.owner().call() == safe.address
+    assert (
+        asset_contracts["erc20"].functions.balanceOf(destination.address).call()
+        == 1_000
+    )
+    assert asset_contracts["erc721"].functions.ownerOf(1).call() == destination.address
+    assert (
+        asset_contracts["erc1155"].functions.balanceOf(destination.address, 7).call()
+        == 25
+    )
+    assert asset_contracts["ownable"].functions.owner().call() == destination.address
     assert _statuses(reporter) == ["rescued"] * 4
     assert not any(
         "Could not replay" in m or "authorization was skipped" in m
@@ -75,12 +92,12 @@ def test_run_rescues_asset_matrix_and_sweeps_all_eth(
     assert [t.role for t in bundle.transactions] == ["rescue-7702"]
     assert bundle.warnings == ()  # the type-4 whole-transaction estimate worked
 
-    # entire victim balance swept to safe; victim left with nothing
-    assert anvil_w3.eth.get_balance(victim.address) == 0
-    assert anvil_w3.eth.get_balance(safe.address) == anvil_w3.to_wei(1, "ether")
+    # entire compromised-wallet balance swept to the destination; nothing left behind
+    assert anvil_w3.eth.get_balance(compromised.address) == 0
+    assert anvil_w3.eth.get_balance(destination.address) == anvil_w3.to_wei(1, "ether")
 
     expected_code = DELEGATION_PREFIX + to_canonical_address(rescue_contract.address)
-    assert bytes(anvil_w3.eth.get_code(victim.address)) == expected_code
+    assert bytes(anvil_w3.eth.get_code(compromised.address)) == expected_code
     assert anvil_w3.eth.get_transaction_count(gas.address) == gas_nonce + 1
 
 
@@ -93,15 +110,15 @@ def test_continuation_batches_are_estimated_with_delegation_override(
     make_ctx,
     reporter,
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     erc20 = asset_contracts["erc20"]
     rescue_data = [
         templates.custom(gas_burner.address, "burn()", [], 30_000)
         for _ in range(MAX_ACTIONS_PER_RESCUE)
-    ] + [templates.erc20_transfer(erc20.address, safe.address, 1_000)]
+    ] + [templates.erc20_transfer(erc20.address, destination.address, 1_000)]
 
     result = engine.run(
-        make_ctx(victim, gas, safe),
+        make_ctx(compromised, gas, destination),
         rescue_data,
         confirm=_confirm,
         legacy_fallback=False,
@@ -112,17 +129,17 @@ def test_continuation_batches_are_estimated_with_delegation_override(
     [(bundle,)] = reporter.named("bundle")
     assert [t.role for t in bundle.transactions] == ["rescue-7702", "rescue-7702"]
     assert bundle.warnings == ()
-    assert erc20.functions.balanceOf(safe.address).call() == 1_000
+    assert erc20.functions.balanceOf(destination.address).call() == 1_000
 
 
 def test_run_refuses_network_address_without_code(
     rescue_accounts, asset_contracts, relay, make_ctx, reporter
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
 
     result = engine.run(
-        make_ctx(victim, gas, safe, rescue_contract="0x" + "55" * 20),
-        _asset_matrix(asset_contracts, victim, safe),
+        make_ctx(compromised, gas, destination, rescue_contract="0x" + "55" * 20),
+        _asset_matrix(asset_contracts, compromised, destination),
         confirm=_confirm,
     )
 
@@ -141,15 +158,19 @@ def test_run_reports_failed_transfers_without_fallback(
     make_ctx,
     reporter,
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     erc20 = asset_contracts["erc20"]
 
     result = engine.run(
-        make_ctx(victim, gas, safe),
+        make_ctx(compromised, gas, destination),
         [
-            templates.erc20_transfer(erc20.address, safe.address, 1_000),
-            templates.erc20_transfer(code_rejecting_erc20.address, safe.address, 500),
-            templates.erc20_transfer(false_returning_erc20.address, safe.address, 500),
+            templates.erc20_transfer(erc20.address, destination.address, 1_000),
+            templates.erc20_transfer(
+                code_rejecting_erc20.address, destination.address, 500
+            ),
+            templates.erc20_transfer(
+                false_returning_erc20.address, destination.address, 500
+            ),
         ],
         confirm=_confirm,
         legacy_fallback=False,
@@ -158,7 +179,7 @@ def test_run_reports_failed_transfers_without_fallback(
     assert result == ExitCode.UNRESCUED
     assert _statuses(reporter) == ["rescued", "failed", "failed"]
     # the good token still moved despite the two failures in the same call
-    assert erc20.functions.balanceOf(safe.address).call() == 1_000
+    assert erc20.functions.balanceOf(destination.address).call() == 1_000
 
 
 def test_run_legacy_fallback_recovers_code_rejecting_token(
@@ -169,11 +190,29 @@ def test_run_legacy_fallback_recovers_code_rejecting_token(
     make_ctx,
     reporter,
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
+    late_eth = anvil_w3.to_wei(0.1, "ether")
+    record_phase = reporter.phase
+
+    # Phase 1 sweeps all ETH, so without new ETH the phase-2 sweep would only carry
+    # fee-rounding dust, which is zero at a fork's base fee of a few wei.
+    def phase(name):
+        record_phase(name)
+        if name.startswith("Phase 2"):
+            anvil_w3.provider.make_request(
+                "anvil_setBalance", [compromised.address, hex(late_eth)]
+            )
+
+    reporter.phase = phase
+    destination_before = anvil_w3.eth.get_balance(destination.address)
 
     result = engine.run(
-        make_ctx(victim, gas, safe),
-        [templates.erc20_transfer(code_rejecting_erc20.address, safe.address, 500)],
+        make_ctx(compromised, gas, destination),
+        [
+            templates.erc20_transfer(
+                code_rejecting_erc20.address, destination.address, 500
+            )
+        ],
         confirm=_confirm,
     )
 
@@ -189,8 +228,13 @@ def test_run_legacy_fallback_recovers_code_rejecting_token(
         "rescue",
         "sweep",
     ]
-    assert bytes(anvil_w3.eth.get_code(victim.address)) == b""
-    assert code_rejecting_erc20.functions.balanceOf(safe.address).call() == 500
+    assert legacy_bundle.sweep_value >= late_eth
+    assert (
+        anvil_w3.eth.get_balance(destination.address) - destination_before
+        >= legacy_bundle.sweep_value
+    )
+    assert bytes(anvil_w3.eth.get_code(compromised.address)) == b""
+    assert code_rejecting_erc20.functions.balanceOf(destination.address).call() == 500
 
 
 def test_gas_burning_actions_cannot_starve_later_actions_or_sweep(
@@ -202,20 +246,20 @@ def test_gas_burning_actions_cannot_starve_later_actions_or_sweep(
     make_ctx,
     reporter,
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     erc20 = asset_contracts["erc20"]
     burner_count = MAX_ACTIONS_PER_RESCUE + 2  # forces a continuation batch
     rescue_data = [
         templates.custom(gas_burner.address, "burn()", [], 30_000)
         for _ in range(burner_count)
-    ] + [templates.erc20_transfer(erc20.address, safe.address, 1_000)]
+    ] + [templates.erc20_transfer(erc20.address, destination.address, 1_000)]
     # Burner estimates revert, so each keeps its 30k floor in the constant budget.
     first_batch = prepare_actions(rescue_data[:MAX_ACTIONS_PER_RESCUE])
-    base_gas = _rescue_base_gas(safe_receive_gas(anvil_w3, safe.address))
+    base_gas = _rescue_base_gas(destination_receive_gas(anvil_w3, destination.address))
     constant_budget = _batch_tx_gas(first_batch, base_gas)
 
     result = engine.run(
-        make_ctx(victim, gas, safe),
+        make_ctx(compromised, gas, destination),
         rescue_data,
         confirm=_confirm,
         legacy_fallback=False,
@@ -223,8 +267,8 @@ def test_gas_burning_actions_cannot_starve_later_actions_or_sweep(
 
     assert result == ExitCode.UNRESCUED
     assert _statuses(reporter) == ["failed"] * burner_count + ["rescued"]
-    assert erc20.functions.balanceOf(safe.address).call() == 1_000
-    assert anvil_w3.eth.get_balance(victim.address) == 0
+    assert erc20.functions.balanceOf(destination.address).call() == 1_000
+    assert anvil_w3.eth.get_balance(compromised.address) == 0
     [(receipts,)] = reporter.named("included")
     assert len(receipts) == 2  # two rescue batches
 
@@ -235,19 +279,19 @@ def test_gas_burning_actions_cannot_starve_later_actions_or_sweep(
     assert receipts[0]["gasUsed"] - stipends <= 0.75 * (constant_budget - stipends)
 
 
-def _spend_victim_nonce(w3, victim):
+def _spend_compromised_nonce(w3, compromised):
     """An attacker transaction from the compromised key, mined just ahead of
     the bundle: it consumes the nonce the bundle was signed for."""
 
     def front_run():
-        signed = victim.sign_transaction(
+        signed = compromised.sign_transaction(
             {
-                "to": victim.address,
+                "to": compromised.address,
                 "value": 0,
                 "gas": 21_000,
                 "maxFeePerGas": w3.eth.get_block("latest")["baseFeePerGas"] * 2 + 10**9,
                 "maxPriorityFeePerGas": 10**9,
-                "nonce": w3.eth.get_transaction_count(victim.address),
+                "nonce": w3.eth.get_transaction_count(compromised.address),
                 "chainId": w3.eth.chain_id,
             }
         )
@@ -263,30 +307,30 @@ def test_nonce_race_leaves_calls_unexecuted_and_fallback_rescues_them(
 ):
     """The skipped authorization runs nothing, so even the uncheckable delist
     is retried rather than reported as an unverified success."""
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     erc721 = asset_contracts["erc721"]
     auction = asset_contracts["auction"]
     for call in (
         erc721.functions.approve(auction.address, 1),
         auction.functions.list(erc721.address, 1),
     ):
-        signed = victim.sign_transaction(
+        signed = compromised.sign_transaction(
             call.build_transaction(
                 {
-                    "from": victim.address,
-                    "nonce": anvil_w3.eth.get_transaction_count(victim.address),
+                    "from": compromised.address,
+                    "nonce": anvil_w3.eth.get_transaction_count(compromised.address),
                 }
             )
         )
         anvil_w3.eth.wait_for_transaction_receipt(
             anvil_w3.eth.send_raw_transaction(signed.raw_transaction)
         )
-    relay.front_run = _spend_victim_nonce(anvil_w3, victim)
+    relay.front_run = _spend_compromised_nonce(anvil_w3, compromised)
 
     result = engine.run(
-        make_ctx(victim, gas, safe),
+        make_ctx(compromised, gas, destination),
         templates.transient_auction_house_erc721_rescue(
-            auction.address, erc721.address, victim.address, safe.address, 1
+            auction.address, erc721.address, compromised.address, destination.address, 1
         ),
         confirm=_confirm,
     )
@@ -296,40 +340,40 @@ def test_nonce_race_leaves_calls_unexecuted_and_fallback_rescues_them(
     assert [o.status for o in phase_1] == ["not_executed", "not_executed"]
     assert any("authorization was skipped" in m for m in reporter.messages("warning"))
     assert [o.status for o in final] == ["unverified", "rescued"]
-    assert erc721.functions.ownerOf(1).call() == safe.address
+    assert erc721.functions.ownerOf(1).call() == destination.address
     assert relay.front_run is None
 
 
 def test_fallback_failure_exits_5(
     anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx, reporter
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     erc20 = asset_contracts["erc20"]
 
     result = engine.run(
-        make_ctx(victim, gas, safe),
+        make_ctx(compromised, gas, destination),
         [
-            templates.erc20_transfer(erc20.address, safe.address, 400),
-            templates.erc20_transfer(erc20.address, safe.address, 1_000),
+            templates.erc20_transfer(erc20.address, destination.address, 400),
+            templates.erc20_transfer(erc20.address, destination.address, 1_000),
         ],
         confirm=_confirm,
     )
 
     assert result == ExitCode.UNRESCUED
     assert _statuses(reporter) == ["rescued", "failed"]
-    assert erc20.functions.balanceOf(safe.address).call() == 400
+    assert erc20.functions.balanceOf(destination.address).call() == 400
     assert any("Leaving out action #2" in m for m in reporter.messages("warning"))
 
 
 def test_never_included_exits_4_after_max_blocks(
     rescue_accounts, asset_contracts, relay, make_ctx, reporter
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     relay.lands = lambda bundle, block: False
 
     result = engine.run(
-        make_ctx(victim, gas, safe, max_blocks=7),
-        _asset_matrix(asset_contracts, victim, safe),
+        make_ctx(compromised, gas, destination, max_blocks=7),
+        _asset_matrix(asset_contracts, compromised, destination),
         confirm=_confirm,
     )
 
@@ -341,19 +385,19 @@ def test_never_included_exits_4_after_max_blocks(
 def test_simulate_exits_2_when_an_action_would_revert(
     rescue_accounts, asset_contracts, relay, make_ctx, reporter
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     erc20 = asset_contracts["erc20"]
 
     result = engine.simulate(
-        make_ctx(victim, gas, safe),
-        [templates.erc20_transfer(erc20.address, safe.address, 1_001)],
+        make_ctx(compromised, gas, destination),
+        [templates.erc20_transfer(erc20.address, destination.address, 1_001)],
     )
 
     assert result == ExitCode.SIMULATION_FAILED
     assert relay.sent == []
 
 
-def test_contract_safe_receives_the_sweep_in_both_phases(
+def test_contract_destination_receives_the_sweep_in_both_phases(
     anvil_w3,
     rescue_accounts,
     asset_contracts,
@@ -362,24 +406,28 @@ def test_contract_safe_receives_the_sweep_in_both_phases(
     relay,
     make_ctx,
 ):
-    victim, gas, _safe = rescue_accounts
-    safe = SimpleNamespace(address=receiver.address)
+    compromised, gas, _destination = rescue_accounts
+    destination = SimpleNamespace(address=receiver.address)
     erc20 = asset_contracts["erc20"]
 
     result = engine.run(
-        make_ctx(victim, gas, safe),
+        make_ctx(compromised, gas, destination),
         [
-            templates.erc20_transfer(erc20.address, safe.address, 1_000),
-            templates.erc20_transfer(code_rejecting_erc20.address, safe.address, 500),
+            templates.erc20_transfer(erc20.address, destination.address, 1_000),
+            templates.erc20_transfer(
+                code_rejecting_erc20.address, destination.address, 500
+            ),
         ],
         confirm=_confirm,
     )
 
     assert result == ExitCode.OK
-    assert code_rejecting_erc20.functions.balanceOf(safe.address).call() == 500
-    assert anvil_w3.eth.get_balance(victim.address) < anvil_w3.to_wei(0.001, "ether")
+    assert code_rejecting_erc20.functions.balanceOf(destination.address).call() == 500
+    assert anvil_w3.eth.get_balance(compromised.address) < anvil_w3.to_wei(
+        0.001, "ether"
+    )
     assert receiver.functions.received().call() == anvil_w3.eth.get_balance(
-        safe.address
+        destination.address
     )
     assert receiver.functions.received().call() > anvil_w3.to_wei(0.99, "ether")
 
@@ -388,14 +436,14 @@ def test_call_that_starts_failing_after_simulation_is_reported_failed(
     anvil_w3, rescue_accounts, switch, relay, make_ctx, reporter
 ):
     """rescue() catches the failing call, so the transaction still succeeds."""
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     funder = anvil_w3.eth.accounts[0]
     relay.front_run = lambda: anvil_w3.eth.wait_for_transaction_receipt(
         switch.functions.toggle().transact({"from": funder})
     )
 
     result = engine.run(
-        make_ctx(victim, gas, safe),
+        make_ctx(compromised, gas, destination),
         [templates.custom(switch.address, "poke()", [], 50_000)],
         confirm=_confirm,
         legacy_fallback=False,
@@ -410,13 +458,13 @@ def test_call_that_starts_failing_after_simulation_is_reported_failed(
 def test_reverted_legacy_transaction_still_counts_as_inclusion(
     anvil_w3, rescue_accounts, switch, relay, make_ctx
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     relay.allow_reverts = True
     funder = anvil_w3.eth.accounts[0]
     relay.front_run = lambda: anvil_w3.eth.wait_for_transaction_receipt(
         switch.functions.toggle().transact({"from": funder})
     )
-    ctx = make_ctx(victim, gas, safe)
+    ctx = make_ctx(compromised, gas, destination)
     prepared = engine.sized_actions(
         ctx, [templates.custom(switch.address, "poke()", [], 50_000)]
     )
@@ -428,15 +476,15 @@ def test_reverted_legacy_transaction_still_counts_as_inclusion(
     statuses = [receipt["status"] for receipt in inclusion.receipts]
     assert statuses[roles.index("rescue")] == 0
     assert statuses[roles.index("sweep")] == 1
-    assert engine.execution_results(inclusion, victim.address, [0]) == {0: False}
+    assert engine.execution_results(inclusion, compromised.address, [0]) == {0: False}
 
 
 def test_run_declined_sends_nothing(rescue_accounts, asset_contracts, relay, make_ctx):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
 
     result = engine.run(
-        make_ctx(victim, gas, safe),
-        _asset_matrix(asset_contracts, victim, safe),
+        make_ctx(compromised, gas, destination),
+        _asset_matrix(asset_contracts, compromised, destination),
         confirm=lambda: False,
     )
 
@@ -446,10 +494,11 @@ def test_run_declined_sends_nothing(rescue_accounts, asset_contracts, relay, mak
 
 
 def test_simulate_sends_nothing(rescue_accounts, asset_contracts, relay, make_ctx):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
 
     result = engine.simulate(
-        make_ctx(victim, gas, safe), _asset_matrix(asset_contracts, victim, safe)
+        make_ctx(compromised, gas, destination),
+        _asset_matrix(asset_contracts, compromised, destination),
     )
 
     assert result == ExitCode.OK
@@ -457,15 +506,15 @@ def test_simulate_sends_nothing(rescue_accounts, asset_contracts, relay, make_ct
     assert relay.sent == []
 
 
-def test_run_rejects_victim_with_contract_code(
+def test_run_rejects_compromised_with_contract_code(
     anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx, reporter
 ):
-    victim, gas, safe = rescue_accounts
-    anvil_w3.provider.make_request("anvil_setCode", [victim.address, "0x6000"])
+    compromised, gas, destination = rescue_accounts
+    anvil_w3.provider.make_request("anvil_setCode", [compromised.address, "0x6000"])
 
     result = engine.run(
-        make_ctx(victim, gas, safe),
-        _asset_matrix(asset_contracts, victim, safe),
+        make_ctx(compromised, gas, destination),
+        _asset_matrix(asset_contracts, compromised, destination),
         confirm=_confirm,
     )
 
@@ -477,12 +526,12 @@ def test_run_rejects_victim_with_contract_code(
 def test_run_waits_for_funding_then_gives_up(
     rescue_accounts, asset_contracts, relay, make_ctx, reporter
 ):
-    victim, _gas, safe = rescue_accounts
+    compromised, _gas, destination = rescue_accounts
     unfunded = Account.create()
 
     result = engine.run(
-        make_ctx(victim, unfunded, safe),
-        _asset_matrix(asset_contracts, victim, safe),
+        make_ctx(compromised, unfunded, destination),
+        _asset_matrix(asset_contracts, compromised, destination),
         confirm=_confirm,
     )
 
@@ -512,14 +561,14 @@ def test_asset_drained_mid_race_fails_while_the_rest_is_rescued(
 ):
     """The attacker moves an NFT it already holds an approval for, just ahead of
     the bundle: that action fails in both phases, and nothing else is blocked."""
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     erc721 = asset_contracts["erc721"]
     attacker = anvil_w3.eth.accounts[1]
-    _send_from(anvil_w3, victim, erc721.functions.approve(attacker, 1))
+    _send_from(anvil_w3, compromised, erc721.functions.approve(attacker, 1))
 
     def drain():
         anvil_w3.eth.wait_for_transaction_receipt(
-            erc721.functions.transferFrom(victim.address, attacker, 1).transact(
+            erc721.functions.transferFrom(compromised.address, attacker, 1).transact(
                 {"from": attacker}
             )
         )
@@ -527,39 +576,44 @@ def test_asset_drained_mid_race_fails_while_the_rest_is_rescued(
     relay.front_run = drain
 
     result = engine.run(
-        make_ctx(victim, gas, safe),
-        _asset_matrix(asset_contracts, victim, safe),
+        make_ctx(compromised, gas, destination),
+        _asset_matrix(asset_contracts, compromised, destination),
         confirm=_confirm,
     )
 
     assert result == ExitCode.UNRESCUED
     assert _statuses(reporter) == ["rescued", "failed", "rescued", "rescued"]
     assert erc721.functions.ownerOf(1).call() == attacker
-    assert asset_contracts["erc20"].functions.balanceOf(safe.address).call() == 1_000
+    assert (
+        asset_contracts["erc20"].functions.balanceOf(destination.address).call()
+        == 1_000
+    )
     assert any("Leaving out action #2" in m for m in reporter.messages("warning"))
 
 
 def test_delist_of_an_unlisted_nft_does_not_fail_the_rescue(
     anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx, reporter
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     erc721 = asset_contracts["erc721"]
     calls = templates.transient_auction_house_erc721_rescue(
         asset_contracts["auction"].address,
         erc721.address,
-        victim.address,
-        safe.address,
+        compromised.address,
+        destination.address,
         1,
     )
     for step, call in enumerate(calls):
         call["plan_action"], call["plan_step"] = 0, step
 
-    result = engine.run(make_ctx(victim, gas, safe), calls, confirm=_confirm)
+    result = engine.run(
+        make_ctx(compromised, gas, destination), calls, confirm=_confirm
+    )
 
     assert result == ExitCode.OK
     assert _statuses(reporter) == ["rescued", "rescued"]
     assert reporter.messages("success")[-1] == "Rescue complete."
-    assert erc721.functions.ownerOf(1).call() == safe.address
+    assert erc721.functions.ownerOf(1).call() == destination.address
     assert len(reporter.named("phase")) == 1
 
 
@@ -569,7 +623,7 @@ def test_fee_spike_mid_run_waits_for_a_top_up_then_lands(
     """The first window does not land and the base fee jumps; the rebuilt
     bundle needs more than the gas wallet holds, so the run waits for a top-up
     instead of submitting an underfunded bundle."""
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     relay.lands = lambda bundle, number: len(relay.sent) > BUNDLE_BLOCK_RANGE
     state = {"spiked": False, "topped_up": False}
 
@@ -590,8 +644,8 @@ def test_fee_spike_mid_run_waits_for_a_top_up_then_lands(
         relay.mine_block()
 
     result = engine.run(
-        make_ctx(victim, gas, safe, sleep=sleep, funding_timeout=60),
-        _asset_matrix(asset_contracts, victim, safe),
+        make_ctx(compromised, gas, destination, sleep=sleep, funding_timeout=60),
+        _asset_matrix(asset_contracts, compromised, destination),
         confirm=_confirm,
     )
 

@@ -140,6 +140,13 @@ export function tokenCandidates(balances: TokenBalance[], metadata: Map<string, 
         action,
         // Token lists are full of airdropped spam, so the user opts in to each one.
         preselect: false,
+        meta: {
+          decimals: meta?.decimals ?? undefined,
+          symbol: meta?.symbol ?? undefined,
+          tokenName: meta?.name ?? undefined,
+          formattedAmount: shown,
+          contractAddress: contract,
+        },
       },
     ];
   });
@@ -151,7 +158,18 @@ export function nftCandidates(nfts: AlchemyNft[]): Candidate[] {
     const collection = nft.contract.name || nft.contract.symbol || contract;
     const name = nft.name || `${collection} #${nft.tokenId}`;
     const spam = Boolean(nft.contract.isSpam);
-    const common = { group: "nfts" as const, title: name, preselect: !spam, source: "Alchemy" };
+    const common = {
+      group: "nfts" as const,
+      title: name,
+      preselect: !spam,
+      source: "Alchemy",
+      meta: {
+        collection,
+        contractAddress: contract,
+        tokenId: nft.tokenId,
+        spam,
+      },
+    };
     const spamNote = spam ? " · flagged as spam" : "";
     if (nft.tokenType === "ERC721") {
       const action = { type: "erc721" as const, contract, token_id: nft.tokenId, label: name };

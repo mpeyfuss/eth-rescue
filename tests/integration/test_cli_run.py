@@ -47,15 +47,15 @@ def _type_keys(monkeypatch, *accounts):
     monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: keys.pop(0))
 
 
-def _plan(tmp_path, victim, gas, safe, asset_contracts):
+def _plan(tmp_path, compromised, gas, destination, asset_contracts):
     path = tmp_path / "plan.json"
     path.write_text(
         json.dumps(
             {
                 "version": 1,
                 "network": "mainnet",
-                "victim": victim.address,
-                "safe": safe.address,
+                "compromised": compromised.address,
+                "destination": destination.address,
                 "gas_wallet": gas.address,
                 "options": {"max_blocks": 10},
                 "actions": [
@@ -89,9 +89,9 @@ def _plan(tmp_path, victim, gas, safe, asset_contracts):
 def test_cli_run_yes_rescues_everything(
     anvil_network, rescue_accounts, asset_contracts, monkeypatch, tmp_path, capsys
 ):
-    victim, gas, safe = rescue_accounts
-    _type_keys(monkeypatch, victim, gas)
-    plan = _plan(tmp_path, victim, gas, safe, asset_contracts)
+    compromised, gas, destination = rescue_accounts
+    _type_keys(monkeypatch, compromised, gas)
+    plan = _plan(tmp_path, compromised, gas, destination, asset_contracts)
 
     code = cli.main(["run", str(plan), "--yes", "--json", "--rpc", anvil_network])
 
@@ -101,8 +101,8 @@ def test_cli_run_yes_rescues_everything(
     assert [o["status"] for o in outcomes] == ["rescued"] * 4
     assert [o["action"] for o in outcomes] == [0, 1, 2, 3]
     assert events[-1]["text"] == "Rescue complete."
-    assert asset_contracts["erc721"].functions.ownerOf(1).call() == safe.address
-    assert asset_contracts["ownable"].functions.owner().call() == safe.address
+    assert asset_contracts["erc721"].functions.ownerOf(1).call() == destination.address
+    assert asset_contracts["ownable"].functions.owner().call() == destination.address
 
 
 def test_cli_simulate_sends_nothing(
@@ -114,12 +114,12 @@ def test_cli_simulate_sends_nothing(
     tmp_path,
     capsys,
 ):
-    victim, gas, safe = rescue_accounts
-    _type_keys(monkeypatch, victim, gas)
-    plan = _plan(tmp_path, victim, gas, safe, asset_contracts)
+    compromised, gas, destination = rescue_accounts
+    _type_keys(monkeypatch, compromised, gas)
+    plan = _plan(tmp_path, compromised, gas, destination, asset_contracts)
 
     code = cli.main(["simulate", str(plan), "--json", "--rpc", anvil_network])
 
     assert code == ExitCode.OK
     assert relay.simulated and relay.sent == []
-    assert asset_contracts["erc721"].functions.ownerOf(1).call() == victim.address
+    assert asset_contracts["erc721"].functions.ownerOf(1).call() == compromised.address

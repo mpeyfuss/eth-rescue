@@ -32,12 +32,12 @@ def _execute_rescue(ctx, rescue_data):
     return preview_bundle
 
 
-def _delegate_victim(w3: Web3, victim, gas, target: str) -> None:
+def _delegate_compromised(w3: Web3, compromised, gas, target: str) -> None:
     priority_fee, max_fee_per_gas = _compute_fees(
         w3, w3.eth.get_block("latest"), Decimal(0)
     )
     authorization = Account.sign_authorization(
-        {"chainId": w3.eth.chain_id, "address": target, "nonce": 0}, victim.key
+        {"chainId": w3.eth.chain_id, "address": target, "nonce": 0}, compromised.key
     )
     signed = gas.sign_transaction(
         {
@@ -59,27 +59,29 @@ def _delegate_victim(w3: Web3, victim, gas, target: str) -> None:
     assert receipt["status"] == 1
 
 
-def test_plain_victim_rescues_asset_matrix_and_sweeps_eth(
+def test_plain_compromised_rescues_asset_matrix_and_sweeps_eth(
     anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     erc20 = asset_contracts["erc20"]
     erc721 = asset_contracts["erc721"]
     erc1155 = asset_contracts["erc1155"]
     ownable = asset_contracts["ownable"]
-    victim_nonce = anvil_w3.eth.get_transaction_count(victim.address)
+    compromised_nonce = anvil_w3.eth.get_transaction_count(compromised.address)
     gas_nonce = anvil_w3.eth.get_transaction_count(gas.address)
     gas_balance = anvil_w3.eth.get_balance(gas.address)
 
     bundle = _execute_rescue(
-        make_ctx(victim, gas, safe),
+        make_ctx(compromised, gas, destination),
         [
-            templates.erc20_transfer(erc20.address, safe.address, 1_000),
-            templates.erc721_transfer(erc721.address, victim.address, safe.address, 1),
-            templates.erc1155_transfer(
-                erc1155.address, victim.address, safe.address, 7, 25
+            templates.erc20_transfer(erc20.address, destination.address, 1_000),
+            templates.erc721_transfer(
+                erc721.address, compromised.address, destination.address, 1
             ),
-            templates.transfer_ownership(ownable.address, safe.address),
+            templates.erc1155_transfer(
+                erc1155.address, compromised.address, destination.address, 7, 25
+            ),
+            templates.transfer_ownership(ownable.address, destination.address),
         ],
     )
 
@@ -91,14 +93,18 @@ def test_plain_victim_rescues_asset_matrix_and_sweeps_eth(
         "rescue",
         "sweep",
     ]
-    assert erc20.functions.balanceOf(safe.address).call() == 1_000
-    assert erc721.functions.ownerOf(1).call() == safe.address
-    assert erc1155.functions.balanceOf(safe.address, 7).call() == 25
-    assert ownable.functions.owner().call() == safe.address
-    assert anvil_w3.eth.get_balance(safe.address) == bundle.sweep_value
-    assert anvil_w3.eth.get_transaction_count(victim.address) == victim_nonce + 5
+    assert erc20.functions.balanceOf(destination.address).call() == 1_000
+    assert erc721.functions.ownerOf(1).call() == destination.address
+    assert erc1155.functions.balanceOf(destination.address, 7).call() == 25
+    assert ownable.functions.owner().call() == destination.address
+    assert anvil_w3.eth.get_balance(destination.address) == bundle.sweep_value
+    assert (
+        anvil_w3.eth.get_transaction_count(compromised.address) == compromised_nonce + 5
+    )
     assert anvil_w3.eth.get_transaction_count(gas.address) == gas_nonce + 1
-    assert 0 <= anvil_w3.eth.get_balance(victim.address) < bundle.victim_funding
+    assert (
+        0 <= anvil_w3.eth.get_balance(compromised.address) < bundle.compromised_funding
+    )
     assert (
         0
         < gas_balance - anvil_w3.eth.get_balance(gas.address)
@@ -109,18 +115,20 @@ def test_plain_victim_rescues_asset_matrix_and_sweeps_eth(
     assert all(receipt["status"] == 1 for receipt in relay.landed[0])
 
 
-def test_delegated_victim_is_undelegated_before_rescue(
+def test_delegated_compromised_is_undelegated_before_rescue(
     anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     erc20 = asset_contracts["erc20"]
-    _delegate_victim(anvil_w3, victim, gas, asset_contracts["delegate"].address)
-    assert has_7702_delegation(anvil_w3, victim.address)
-    starting_nonce = anvil_w3.eth.get_transaction_count(victim.address)
+    _delegate_compromised(
+        anvil_w3, compromised, gas, asset_contracts["delegate"].address
+    )
+    assert has_7702_delegation(anvil_w3, compromised.address)
+    starting_nonce = anvil_w3.eth.get_transaction_count(compromised.address)
 
     bundle = _execute_rescue(
-        make_ctx(victim, gas, safe),
-        [templates.erc20_transfer(erc20.address, safe.address, 1_000)],
+        make_ctx(compromised, gas, destination),
+        [templates.erc20_transfer(erc20.address, destination.address, 1_000)],
     )
 
     assert [transaction.role for transaction in bundle.transactions] == [
@@ -129,38 +137,38 @@ def test_delegated_victim_is_undelegated_before_rescue(
         "rescue",
         "sweep",
     ]
-    assert anvil_w3.eth.get_code(victim.address) == b""
-    assert erc20.functions.balanceOf(safe.address).call() == 1_000
-    assert anvil_w3.eth.get_transaction_count(victim.address) == starting_nonce + 3
+    assert anvil_w3.eth.get_code(compromised.address) == b""
+    assert erc20.functions.balanceOf(destination.address).call() == 1_000
+    assert anvil_w3.eth.get_transaction_count(compromised.address) == starting_nonce + 3
     assert len(relay.sent) == BUNDLE_BLOCK_RANGE
 
 
 def test_delist_then_transfer_rescues_escrowed_erc721(
     anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     erc721 = asset_contracts["erc721"]
     auction = asset_contracts["auction"]
     approve = erc721.functions.approve(auction.address, 1).build_transaction(
         {
-            "from": victim.address,
-            "nonce": anvil_w3.eth.get_transaction_count(victim.address),
+            "from": compromised.address,
+            "nonce": anvil_w3.eth.get_transaction_count(compromised.address),
         }
     )
-    assert _send_account_transaction(anvil_w3, victim, approve)["status"] == 1
+    assert _send_account_transaction(anvil_w3, compromised, approve)["status"] == 1
     listing = auction.functions.list(erc721.address, 1).build_transaction(
         {
-            "from": victim.address,
-            "nonce": anvil_w3.eth.get_transaction_count(victim.address),
+            "from": compromised.address,
+            "nonce": anvil_w3.eth.get_transaction_count(compromised.address),
         }
     )
-    assert _send_account_transaction(anvil_w3, victim, listing)["status"] == 1
+    assert _send_account_transaction(anvil_w3, compromised, listing)["status"] == 1
     assert erc721.functions.ownerOf(1).call() == auction.address
 
     bundle = _execute_rescue(
-        make_ctx(victim, gas, safe),
+        make_ctx(compromised, gas, destination),
         templates.transient_auction_house_erc721_rescue(
-            auction.address, erc721.address, victim.address, safe.address, 1
+            auction.address, erc721.address, compromised.address, destination.address, 1
         ),
     )
 
@@ -173,27 +181,27 @@ def test_delist_then_transfer_rescues_escrowed_erc721(
         auction.functions.seller(erc721.address, 1).call()
         == "0x0000000000000000000000000000000000000000"
     )
-    assert erc721.functions.ownerOf(1).call() == safe.address
+    assert erc721.functions.ownerOf(1).call() == destination.address
     assert len(relay.sent) == BUNDLE_BLOCK_RANGE
 
 
 def test_reverting_action_rolls_back_simulation_and_blocks_submission(
     anvil_w3, rescue_accounts, asset_contracts, relay, make_ctx
 ):
-    victim, gas, safe = rescue_accounts
+    compromised, gas, destination = rescue_accounts
     erc20 = asset_contracts["erc20"]
-    ctx = make_ctx(victim, gas, safe)
+    ctx = make_ctx(compromised, gas, destination)
     prepared = prepare_actions(
-        [templates.erc20_transfer(erc20.address, safe.address, 1_001)]
+        [templates.erc20_transfer(erc20.address, destination.address, 1_001)]
     )
     bundle = ctx.prepare(prepare_bundle, prepared)
     before = {
-        "victim_balance": anvil_w3.eth.get_balance(victim.address),
+        "compromised_balance": anvil_w3.eth.get_balance(compromised.address),
         "gas_balance": anvil_w3.eth.get_balance(gas.address),
-        "victim_nonce": anvil_w3.eth.get_transaction_count(victim.address),
+        "compromised_nonce": anvil_w3.eth.get_transaction_count(compromised.address),
         "gas_nonce": anvil_w3.eth.get_transaction_count(gas.address),
-        "token_balance": erc20.functions.balanceOf(victim.address).call(),
-        "code": anvil_w3.eth.get_code(victim.address),
+        "token_balance": erc20.functions.balanceOf(compromised.address).call(),
+        "code": anvil_w3.eth.get_code(compromised.address),
     }
 
     outcome = engine.simulate_prepared_bundle(ctx, bundle)
@@ -203,12 +211,12 @@ def test_reverting_action_rolls_back_simulation_and_blocks_submission(
     assert failure.role == "rescue"
     assert failure.action_index == 0
     assert before == {
-        "victim_balance": anvil_w3.eth.get_balance(victim.address),
+        "compromised_balance": anvil_w3.eth.get_balance(compromised.address),
         "gas_balance": anvil_w3.eth.get_balance(gas.address),
-        "victim_nonce": anvil_w3.eth.get_transaction_count(victim.address),
+        "compromised_nonce": anvil_w3.eth.get_transaction_count(compromised.address),
         "gas_nonce": anvil_w3.eth.get_transaction_count(gas.address),
-        "token_balance": erc20.functions.balanceOf(victim.address).call(),
-        "code": anvil_w3.eth.get_code(victim.address),
+        "token_balance": erc20.functions.balanceOf(compromised.address).call(),
+        "code": anvil_w3.eth.get_code(compromised.address),
     }
     assert (
         engine.send_with_retry(ctx, prepared, prepare_bundle)

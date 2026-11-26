@@ -15,6 +15,7 @@ class RecordingReporter:
 
     def __init__(self):
         self.events: list[tuple[str, tuple]] = []
+        self.options: list[tuple[str, dict]] = []
 
     def waiting(self, text):
         return nullcontext()
@@ -23,8 +24,9 @@ class RecordingReporter:
         if name not in REPORTER_EVENTS:
             raise AttributeError(name)
 
-        def record(*args):
+        def record(*args, **options):
             self.events.append((name, args))
+            self.options.append((name, options))
 
         return record
 

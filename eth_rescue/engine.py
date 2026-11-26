@@ -76,9 +76,9 @@ class RunProgress:
 @dataclass(frozen=True)
 class RescueContext:
     w3: RelayWeb3
-    victim: LocalAccount
+    compromised: LocalAccount
     gas: LocalAccount
-    safe: str
+    destination: str
     reporter: Reporter
     rescue_contract: str
     rescue_codehash: str | None = None
@@ -99,10 +99,10 @@ class RescueContext:
     ) -> PreparedBundle:
         return preparer(
             self.w3,
-            self.victim,
+            self.compromised,
             self.gas,
             prepared,
-            self.safe,
+            self.destination,
             self.extra_priority_fee_gwei,
         )
 
@@ -173,7 +173,11 @@ def _same_hash(reported: object, expected: bytes) -> bool:
 
 
 def simulate_prepared_bundle(
-    ctx: RescueContext, bundle: PreparedBundle, indices: list[int] | None = None
+    ctx: RescueContext,
+    bundle: PreparedBundle,
+    indices: list[int] | None = None,
+    *,
+    recheck: bool = False,
 ) -> SimulationOutcome:
     """Simulate the exact immutable bundle that may subsequently be submitted.
     `indices` maps the bundle's action positions back to plan call indices."""
@@ -203,7 +207,7 @@ def simulate_prepared_bundle(
             ctx.reporter.message("error", failure.message)
             return SimulationOutcome(False, bundle=bundle, failures=(failure,))
 
-    ctx.reporter.simulation(result)
+    ctx.reporter.simulation(result, bundle, recheck)
     failures = tuple(
         SimulationFailure(
             str(tx_result.get("error") or tx_result.get("revert")),
@@ -220,8 +224,6 @@ def simulate_prepared_bundle(
         )
     if failures:
         return SimulationOutcome(False, bundle=bundle, failures=failures)
-
-    ctx.reporter.message("success", "Simulation succeeded.")
     return SimulationOutcome(True, bundle=bundle)
 
 
@@ -526,7 +528,7 @@ def _send_windows(
             continue
 
         if not _stale(ctx, bundle):
-            simulation = simulate_prepared_bundle(ctx, bundle, active)
+            simulation = simulate_prepared_bundle(ctx, bundle, active, recheck=True)
             if not simulation and not _stale(ctx, bundle):
                 # The rebuilt bundle reuses the gas wallet's nonce, so a clean
                 # funding transaction means no earlier bundle has landed.
@@ -569,8 +571,10 @@ def _report_predictions(
         if result is False:
             ctx.reporter.message(
                 "warning",
-                f"Action #{indices[position] + 1} reverts in a dry run of the rescue "
-                "call, so it is expected to fail.",
+                f"Action #{indices[position] + 1} reverts in a dry run through the "
+                "delegated wallet, so it will fail in this phase. Some contracts "
+                "refuse calls from wallets with code; the legacy fallback, when on, "
+                "retries it as a direct transaction.",
             )
 
 
@@ -614,7 +618,7 @@ def _fund_and_simulate(
 
 def execution_results(
     inclusion: Inclusion,
-    victim: str,
+    compromised: str,
     indices: list[int],
     *,
     ran: dict[int, bool | None] | None = None,
@@ -628,7 +632,7 @@ def execution_results(
     whose missing ActionResult log means the call never ran (its batch reverted).
     """
     results: dict[int, CallResult] = dict.fromkeys(indices)
-    victim = victim.lower()
+    compromised = compromised.lower()
     ran = ran or {}
     for position, (transaction, receipt) in enumerate(
         zip(inclusion.bundle.transactions, inclusion.receipts)
@@ -649,7 +653,7 @@ def execution_results(
         for log in receipt["logs"]:
             topics = log["topics"]
             if (
-                str(log["address"]).lower() != victim
+                str(log["address"]).lower() != compromised
                 or len(topics) < 2
                 or bytes(topics[0]) != ACTION_RESULT_TOPIC
             ):
@@ -684,20 +688,20 @@ def _replay_rescue(
             receipts[position]["transactionHash"]
         ):
             raise BlockMismatch(f"block {inclusion.block} does not match its receipts")
-    # The first rescue transaction always carries the victim's authorization;
+    # The first rescue transaction always carries the compromised wallet's authorization;
     # without it the replay would see no delegation change at all.
     if not transactions[indices[positions[0]]].get("authorizationList"):
         raise IncompleteBlock(
             f"the RPC returned block {inclusion.block} without authorization lists"
         )
     parent = int(block["number"]) - 1
-    victim = ctx.victim.address
+    compromised = ctx.compromised.address
     delegates = replay_delegates(
         transactions[: max(indices.values()) + 1],
-        victim,
+        compromised,
         ctx.w3.eth.chain_id,
-        nonce=ctx.w3.eth.get_transaction_count(victim, parent),
-        delegate=delegation_target(ctx.w3, victim, parent),
+        nonce=ctx.w3.eth.get_transaction_count(compromised, parent),
+        delegate=delegation_target(ctx.w3, compromised, parent),
     )
     rescue = ctx.rescue_contract.lower()
     return {
@@ -755,7 +759,7 @@ def sized_actions(
     """Encode actions and raise their gas limits to live estimates."""
     floors = prepare_actions(rescue_data)
     prepared, failures = size_actions(
-        ctx.w3, ctx.victim.address, floors, ctx.gas_multiplier
+        ctx.w3, ctx.compromised.address, floors, ctx.gas_multiplier
     )
     for index, (floor, action) in enumerate(zip(floors, prepared)):
         if index in failures:
@@ -782,6 +786,7 @@ def _execute_phase(
     confirm: Confirm | None,
     *,
     drop_failing: bool = False,
+    interim: bool = False,
 ) -> list[ActionOutcome] | ExitCode:
     """Run the plan calls in `indices` through one bundle kind. With
     `drop_failing`, calls that revert in simulation are left out (recorded as
@@ -805,7 +810,7 @@ def _execute_phase(
         active = [index for index in active if index not in failing]
         if not active:
             outcomes = _left_out_outcomes(dropped)
-            ctx.reporter.outcomes(rescue_data, outcomes)
+            ctx.reporter.outcomes(rescue_data, outcomes, interim=interim)
             return outcomes
 
     if confirm is not None and not confirm():
@@ -831,7 +836,7 @@ def _execute_phase(
     if inclusion is not None:
         executed = execution_results(
             inclusion,
-            ctx.victim.address,
+            ctx.compromised.address,
             list(landed),
             ran=_rescue_ran(ctx, inclusion),
         )
@@ -844,27 +849,33 @@ def _execute_phase(
             outcomes + _left_out_outcomes(dropped), key=lambda outcome: outcome.index
         ),
     )
-    ctx.reporter.outcomes(rescue_data, outcomes)
+    ctx.reporter.outcomes(rescue_data, outcomes, interim=interim)
     return outcomes
 
 
 def _check_roles(ctx: RescueContext, rescue_data: list[RescueData]) -> None:
     """The singleton's own address rules, checked before anything is signed."""
-    victim, gas, safe, rescue = (
+    compromised, gas, destination, rescue = (
         a.lower()
-        for a in (ctx.victim.address, ctx.gas.address, ctx.safe, ctx.rescue_contract)
-    )
-    if safe == ZERO_ADDRESS or safe in (victim, gas):
-        raise ValueError(
-            "The safe must be a non-zero address that differs from the compromised "
-            "and gas wallets"
+        for a in (
+            ctx.compromised.address,
+            ctx.gas.address,
+            ctx.destination,
+            ctx.rescue_contract,
         )
-    if safe == rescue:
+    )
+    if destination == ZERO_ADDRESS or destination in (compromised, gas):
         raise ValueError(
-            "The safe must not be the EthRescue contract: ETH sent there is lost"
+            "The destination wallet must be a non-zero address that differs from "
+            "the compromised and gas wallets"
+        )
+    if destination == rescue:
+        raise ValueError(
+            "The destination wallet must not be the EthRescue contract: ETH sent "
+            "there is lost"
         )
     for index, data in enumerate(rescue_data):
-        if data["address"].lower() in (victim, ZERO_ADDRESS):
+        if data["address"].lower() in (compromised, ZERO_ADDRESS):
             raise ValueError(
                 f"Action #{index + 1} targets the compromised wallet or the zero "
                 "address, which EthRescue rejects"
@@ -878,7 +889,7 @@ def _preflight(
         require_rescue_contract(ctx.w3, ctx.rescue_contract, ctx.rescue_codehash)
         prepare_actions(rescue_data)
         _check_roles(ctx, rescue_data)
-        delegate = delegation_target(ctx.w3, ctx.victim.address)
+        delegate = delegation_target(ctx.w3, ctx.compromised.address)
         if ctx.w3.eth.get_code(ctx.gas.address):
             raise ValueError(
                 "The gas wallet has code (a smart account or EIP-7702 delegation). "
@@ -908,14 +919,14 @@ def _describe(
 ) -> None:
     """Everything the confirmation covers, stated before funding or confirming."""
     say = ctx.reporter.message
-    say("info", f"Network: {ctx.network or f'chain {ctx.w3.eth.chain_id}'}")
-    say("info", f"Compromised wallet: {ctx.victim.address}")
+    say("info", f"Network:            {ctx.network or f'chain {ctx.w3.eth.chain_id}'}")
+    say("info", f"Compromised wallet: {ctx.compromised.address}")
     say(
         "info",
-        f"Safe: {ctx.safe}. It receives every typed asset and all ETH left in the "
-        "compromised wallet.",
+        f"Destination wallet: {ctx.destination} (receives every asset and the "
+        "leftover ETH)",
     )
-    say("info", f"Gas wallet: {ctx.gas.address}. It pays every fee.")
+    say("info", f"Gas wallet:         {ctx.gas.address} (pays every fee)")
     if ctx.extra_priority_fee_gwei > HIGH_PRIORITY_FEE_GWEI:
         say(
             "warning",
@@ -929,23 +940,25 @@ def _describe(
                 "warning",
                 f"Action #{index + 1} is a custom call: {data['address']}."
                 f"{data['function_signature']} with args {data['args']}. Its "
-                "arguments, not the safe setting, decide where anything goes.",
+                "arguments, not the destination wallet, decide where anything goes.",
             )
     if legacy_fallback:
         say(
             "info",
-            "Legacy fallback is on: actions with no effect in phase 1 are retried as "
+            "Legacy fallback:    on. Actions with no effect in phase 1 are retried as "
             "direct transactions from the compromised wallet, without asking again. "
             "Unverified and partially delivered actions are never retried.",
         )
     else:
-        say("info", "Legacy fallback is off: failed actions are reported, not retried.")
+        say(
+            "info", "Legacy fallback:    off. Failed actions are reported, not retried."
+        )
 
 
 def _report_final_state(ctx: RescueContext) -> None:
     try:
-        balance = ctx.w3.eth.get_balance(ctx.victim.address)
-        delegation = delegation_target(ctx.w3, ctx.victim.address)
+        balance = ctx.w3.eth.get_balance(ctx.compromised.address)
+        delegation = delegation_target(ctx.w3, ctx.compromised.address)
     except Exception as e:
         ctx.reporter.message("warning", f"Could not read the final wallet state: {e}")
         return
@@ -1015,8 +1028,8 @@ def simulate(
     """Fund-check and simulate the phase-1 bundle without submitting it."""
     if not _preflight(ctx, rescue_data, legacy_fallback):
         return ExitCode.INVALID
-    ctx.reporter.plan(rescue_data)
     _describe(ctx, rescue_data, legacy_fallback)
+    ctx.reporter.plan(rescue_data)
     indices = list(range(len(rescue_data)))
     simulation = _fund_and_simulate(
         ctx, sized_actions(ctx, rescue_data), _rescue_7702(ctx), indices
@@ -1056,10 +1069,10 @@ def run(
 ) -> ExitCode:
     if not _preflight(ctx, rescue_data, legacy_fallback):
         return ExitCode.INVALID
-    ctx.reporter.plan(rescue_data)
     _describe(ctx, rescue_data, legacy_fallback)
+    ctx.reporter.plan(rescue_data)
     # Size once, before any delegation changes: these estimates also describe the
-    # undelegated victim that the legacy fallback executes as.
+    # undelegated compromised wallet that the legacy fallback executes as.
     prepared = sized_actions(ctx, rescue_data)
     everything = list(range(len(rescue_data)))
 
@@ -1080,11 +1093,19 @@ def run(
         ctx.reporter.phase("Phase 2: legacy fallback")
         ctx.reporter.message(
             "info",
-            f"Retrying {len(retry)} action(s) with no effect as direct victim "
-            "transactions: " + ", ".join(f"#{index + 1}" for index in retry),
+            f"Retrying {len(retry)} action(s) with no effect as direct "
+            "transactions from the compromised wallet: "
+            + ", ".join(f"#{index + 1}" for index in retry),
         )
         phase_2 = _execute_phase(
-            ctx, rescue_data, prepared, retry, prepare_bundle, None, drop_failing=True
+            ctx,
+            rescue_data,
+            prepared,
+            retry,
+            prepare_bundle,
+            None,
+            drop_failing=True,
+            interim=True,
         )
         if isinstance(phase_2, ExitCode):
             ctx.reporter.message("error", "The legacy fallback did not complete.")
@@ -1096,6 +1117,7 @@ def run(
             return code
         outcomes |= {outcome.index: outcome for outcome in phase_2}
         merged = _finished_steps(rescue_data, [outcomes[i] for i in everything])
+        ctx.reporter.phase("Result")
         ctx.reporter.outcomes(rescue_data, merged)
         return _finish(ctx, rescue_data, merged)
 

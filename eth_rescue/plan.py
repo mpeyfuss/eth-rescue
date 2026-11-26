@@ -15,6 +15,7 @@ from pydantic import (
 )
 
 from eth_rescue import templates
+from eth_rescue.collections import COLLECTION_NAMES, collection_contract, collection_for
 from eth_rescue.templates import MAX_ACTION_GAS
 from eth_rescue.networks import NETWORKS
 from eth_rescue.calldata import (
@@ -117,6 +118,17 @@ class TransientDelistErc721Action(_SingleCallAction):
     token_id: Uint256
 
 
+class CryptoPunkAction(_SingleCallAction):
+    type: Literal["cryptopunk"]
+    # Punks are numbered 0 to 9999.
+    token_id: Annotated[str, Field(pattern=r"^[0-9]{1,4}$")]
+
+
+class SuperRareV1Action(_SingleCallAction):
+    type: Literal["superrare_v1"]
+    token_id: Uint256
+
+
 class CustomAction(_Action):
     type: Literal["custom"]
     target: Address
@@ -135,6 +147,8 @@ Action = Annotated[
     | Erc1155Action
     | OwnershipAction
     | TransientDelistErc721Action
+    | CryptoPunkAction
+    | SuperRareV1Action
     | CustomAction,
     Field(discriminator="type"),
 ]
@@ -149,26 +163,38 @@ class Options(_Model):
 class Plan(_Model):
     version: Literal[1]
     network: NetworkName
-    victim: Address
-    safe: Address
+    compromised: Address
+    destination: Address
     gas_wallet: Address | None = None
     options: Options = Field(default_factory=Options)
     actions: list[Action] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _distinct_wallets(self) -> "Plan":
-        if self.safe == self.victim:
-            raise ValueError("safe must differ from victim")
-        if self.safe.lower() == (NETWORKS[self.network]["eth_rescue"] or "").lower():
+        if self.destination == self.compromised:
+            raise ValueError("destination must differ from the compromised wallet")
+        if (
+            self.destination.lower()
+            == (NETWORKS[self.network]["eth_rescue"] or "").lower()
+        ):
             raise ValueError(
-                "safe must not be the EthRescue contract: ETH sent there is lost"
+                "destination must not be the EthRescue contract: ETH sent there is lost"
             )
-        if self.gas_wallet in (self.victim, self.safe):
-            raise ValueError("gas_wallet must differ from victim and safe")
+        if self.gas_wallet in (self.compromised, self.destination):
+            raise ValueError(
+                "gas_wallet must differ from the compromised and destination wallets"
+            )
         for index, action in enumerate(self.actions):
+            collection = collection_for(self.network, getattr(action, "contract", None))
+            if collection is not None:
+                raise ValueError(
+                    f"actions.{index}.contract is {COLLECTION_NAMES[collection]}, "
+                    f'which needs a "{collection}" action; a generic '
+                    f"{action.type} transfer does not work on it"
+                )
             for field in ("contract", "auction_house", "target"):
-                if getattr(action, field, None) == self.victim:
-                    # EthRescue runs as the victim and rejects calls to itself.
+                if getattr(action, field, None) == self.compromised:
+                    # EthRescue runs as the compromised wallet and rejects calls to itself.
                     raise ValueError(
                         f"actions.{index}.{field} must not be the compromised wallet"
                     )
@@ -179,34 +205,55 @@ def _template_calls(action: Action, plan: Plan) -> list[RescueData]:
     match action:
         case Erc20Action():
             return [
-                templates.erc20_transfer(action.contract, plan.safe, int(action.amount))
+                templates.erc20_transfer(
+                    action.contract, plan.destination, int(action.amount)
+                )
             ]
         case Erc721Action():
             return [
                 templates.erc721_transfer(
-                    action.contract, plan.victim, plan.safe, int(action.token_id)
+                    action.contract,
+                    plan.compromised,
+                    plan.destination,
+                    int(action.token_id),
                 )
             ]
         case Erc1155Action():
             return [
                 templates.erc1155_transfer(
                     action.contract,
-                    plan.victim,
-                    plan.safe,
+                    plan.compromised,
+                    plan.destination,
                     int(action.token_id),
                     int(action.amount),
                 )
             ]
         case OwnershipAction():
-            return [templates.transfer_ownership(action.contract, plan.safe)]
+            return [templates.transfer_ownership(action.contract, plan.destination)]
         case TransientDelistErc721Action():
             return templates.transient_auction_house_erc721_rescue(
                 action.auction_house,
                 action.contract,
-                plan.victim,
-                plan.safe,
+                plan.compromised,
+                plan.destination,
                 int(action.token_id),
             )
+        case CryptoPunkAction():
+            return [
+                templates.cryptopunk_transfer(
+                    collection_contract(plan.network, "cryptopunk"),
+                    plan.destination,
+                    int(action.token_id),
+                )
+            ]
+        case SuperRareV1Action():
+            return [
+                templates.superrare_v1_transfer(
+                    collection_contract(plan.network, "superrare_v1"),
+                    plan.destination,
+                    int(action.token_id),
+                )
+            ]
         case CustomAction():
             return [
                 templates.custom(

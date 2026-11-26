@@ -35,6 +35,16 @@ ERC1155_BALANCE_OF_ABI = [
     }
 ]
 
+CRYPTOPUNKS_OWNER_ABI = [
+    {
+        "inputs": [{"name": "punkIndex", "type": "uint256"}],
+        "name": "punkIndexToAddress",
+        "outputs": [{"name": "owner", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+
 OWNABLE_OWNER_ABI = [
     {
         "inputs": [],

@@ -43,8 +43,8 @@ def _fork_targets() -> dict[str, ForkTarget]:
     targets = {
         "sepolia": ForkTarget(
             rpc="https://ethereum-sepolia-rpc.publicnode.com",
-            eth_rescue="0xe9Da4345F6AB43e05FF3DE7999A99Dc30710421A",
-            eth_rescue_codehash="0x4066e42da7841bead9a6829d601b8219458298865f7562dc5a6a2563dd32474b",
+            eth_rescue="0xdC7eC38149c572a29Ac89813eda47140Ac8cD969",
+            eth_rescue_codehash="0x2e61375f0a3726610b9b221cfc0fcf470e0ea7a582d8c0c46ff8f47e08d6ac66",
         )
     }
     for name, network in NETWORKS.items():
@@ -108,7 +108,7 @@ def anvil_w3(fork: ForkTarget | None) -> Iterator[Web3]:
             "--enable-tx-gas-limit",
             "--order",
             "fifo",
-            # Bundles fund the victim mid-block; balances are still enforced
+            # Bundles fund the compromised wallet mid-block; balances are still enforced
             # when the block executes, as a builder would.
             "--disable-pool-balance-checks",
             "--quiet",
@@ -166,7 +166,7 @@ class BlockRelay:
 
     Bundle blocks are built with `anvil_reorg`, which executes a given
     transaction list as one block. The mempool cannot do this: it holds back a
-    victim transaction whose nonce an earlier authorization in the same block
+    compromised transaction whose nonce an earlier authorization in the same block
     bumps.
     """
 
@@ -277,19 +277,19 @@ def _deploy(w3: Web3, name: str, out: Path = CONTRACT_OUT):
 
 @pytest.fixture
 def rescue_accounts(anvil_w3: Web3) -> tuple[LocalAccount, LocalAccount, LocalAccount]:
-    victim = Account.create()
+    compromised = Account.create()
     gas = Account.create()
-    safe = Account.create()
+    destination = Account.create()
     funder = anvil_w3.eth.accounts[0]
     for address, amount in (
-        (victim.address, anvil_w3.to_wei(1, "ether")),
+        (compromised.address, anvil_w3.to_wei(1, "ether")),
         (gas.address, anvil_w3.to_wei(10, "ether")),
     ):
         tx_hash = anvil_w3.eth.send_transaction(
             {"from": funder, "to": address, "value": amount}
         )
         anvil_w3.eth.wait_for_transaction_receipt(tx_hash)
-    return victim, gas, safe
+    return compromised, gas, destination
 
 
 @pytest.fixture
@@ -301,10 +301,10 @@ def relay(anvil_w3: Web3) -> BlockRelay:
 
 @pytest.fixture
 def code_rejecting_erc20(anvil_w3: Web3, rescue_accounts):
-    victim, _gas, _safe = rescue_accounts
+    compromised, _gas, _destination = rescue_accounts
     token = _deploy(anvil_w3, "FixtureCodeRejectingERC20")
     receipt = anvil_w3.eth.wait_for_transaction_receipt(
-        token.functions.mint(victim.address, 500).transact(
+        token.functions.mint(compromised.address, 500).transact(
             {"from": anvil_w3.eth.accounts[0]}
         )
     )
@@ -314,10 +314,10 @@ def code_rejecting_erc20(anvil_w3: Web3, rescue_accounts):
 
 @pytest.fixture
 def false_returning_erc20(anvil_w3: Web3, rescue_accounts):
-    victim, _gas, _safe = rescue_accounts
+    compromised, _gas, _destination = rescue_accounts
     token = _deploy(anvil_w3, "FixtureFalseReturningERC20")
     receipt = anvil_w3.eth.wait_for_transaction_receipt(
-        token.functions.mint(victim.address, 500).transact(
+        token.functions.mint(compromised.address, 500).transact(
             {"from": anvil_w3.eth.accounts[0]}
         )
     )
@@ -327,7 +327,7 @@ def false_returning_erc20(anvil_w3: Web3, rescue_accounts):
 
 @pytest.fixture
 def asset_contracts(anvil_w3: Web3, rescue_accounts):
-    victim, _gas, _safe = rescue_accounts
+    compromised, _gas, _destination = rescue_accounts
     contracts = {
         "erc20": _deploy(anvil_w3, "FixtureERC20"),
         "erc721": _deploy(anvil_w3, "FixtureERC721"),
@@ -338,10 +338,10 @@ def asset_contracts(anvil_w3: Web3, rescue_accounts):
     }
     funder = anvil_w3.eth.accounts[0]
     setup = (
-        contracts["erc20"].functions.mint(victim.address, 1_000),
-        contracts["erc721"].functions.mint(victim.address, 1),
-        contracts["erc1155"].functions.mint(victim.address, 7, 25),
-        contracts["ownable"].functions.transferOwnership(victim.address),
+        contracts["erc20"].functions.mint(compromised.address, 1_000),
+        contracts["erc721"].functions.mint(compromised.address, 1),
+        contracts["erc1155"].functions.mint(compromised.address, 7, 25),
+        contracts["ownable"].functions.transferOwnership(compromised.address),
     )
     for call in setup:
         receipt = anvil_w3.eth.wait_for_transaction_receipt(
@@ -353,7 +353,7 @@ def asset_contracts(anvil_w3: Web3, rescue_accounts):
 
 @pytest.fixture
 def rescue_contract(anvil_w3: Web3, fork: ForkTarget | None):
-    """The EthRescue deployment victims delegate to: the live one when forking."""
+    """The EthRescue deployment compromised wallets delegate to: the live one when forking."""
     if fork is None:
         return _deploy(anvil_w3, "EthRescue", ETH_RESCUE_OUT)
     abi, _bytecode = _artifact("EthRescue", ETH_RESCUE_OUT)
@@ -365,12 +365,12 @@ def make_ctx(anvil_w3: Web3, reporter, rescue_contract, relay, fork):
     """Build a RescueContext whose every sleep mines one block through the relay;
     extra fields override defaults."""
 
-    def make(victim, gas, safe, **overrides) -> RescueContext:
+    def make(compromised, gas, destination, **overrides) -> RescueContext:
         fields = {
             "w3": anvil_w3,
-            "victim": victim,
+            "compromised": compromised,
             "gas": gas,
-            "safe": safe.address,
+            "destination": destination.address,
             "reporter": reporter,
             "rescue_contract": rescue_contract.address,
             "rescue_codehash": fork.eth_rescue_codehash if fork else None,
@@ -390,7 +390,7 @@ def gas_burner(anvil_w3: Web3):
 
 @pytest.fixture
 def receiver(anvil_w3: Web3):
-    """A contract safe whose receive() needs more than the 2,300-gas stipend."""
+    """A contract destination whose receive() needs more than the 2,300-gas stipend."""
     return _deploy(anvil_w3, "FixtureReceiver")
 
 

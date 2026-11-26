@@ -8,10 +8,10 @@ from eth_utils import keccak, to_checksum_address
 
 from eth_rescue import contract
 
-VICTIM = Account.from_key("0x" + "0a" * 32)
+COMPROMISED = Account.from_key("0x" + "0a" * 32)
 REQUEST = contract.RescueRequest(
     rescuer="0x" + "11" * 20,
-    safe="0x" + "22" * 20,
+    destination="0x" + "22" * 20,
     deadline=1_700_000_000,
     actions_hash=keccak(b"actions"),
 )
@@ -44,32 +44,36 @@ def test_actions_hash_is_keccak_of_abi_encoded_actions():
     assert contract.actions_hash(prepared) == expected
 
 
-def test_sign_rescue_request_recovers_to_victim_over_victim_domain():
-    signature = contract.sign_rescue_request(VICTIM.key, 1, VICTIM.address, REQUEST)
+def test_sign_rescue_request_recovers_to_compromised_over_compromised_domain():
+    signature = contract.sign_rescue_request(
+        COMPROMISED.key, 1, COMPROMISED.address, REQUEST
+    )
 
     message = encode_typed_data(
         domain_data={
             "name": "EthRescue",
             "version": "1",
             "chainId": 1,
-            "verifyingContract": VICTIM.address,
+            "verifyingContract": COMPROMISED.address,
         },
         message_types=contract.RESCUE_REQUEST_TYPES,
         message_data={
             "rescuer": REQUEST.rescuer,
-            "safe": REQUEST.safe,
+            "destination": REQUEST.destination,
             "deadline": REQUEST.deadline,
             "actionsHash": REQUEST.actions_hash,
         },
     )
     assert len(signature) == 65
-    assert Account.recover_message(message, signature=signature) == VICTIM.address
+    assert Account.recover_message(message, signature=signature) == COMPROMISED.address
 
 
 def test_signatures_differ_across_chains():
     assert contract.sign_rescue_request(
-        VICTIM.key, 1, VICTIM.address, REQUEST
-    ) != contract.sign_rescue_request(VICTIM.key, 11155111, VICTIM.address, REQUEST)
+        COMPROMISED.key, 1, COMPROMISED.address, REQUEST
+    ) != contract.sign_rescue_request(
+        COMPROMISED.key, 11155111, COMPROMISED.address, REQUEST
+    )
 
 
 def test_encode_rescue_call_round_trips():
@@ -153,7 +157,7 @@ def test_require_rescue_contract_rejects_delegated_account():
 
 def test_rescue_request_typehash_matches_the_eip712_type():
     assert contract.RESCUE_REQUEST_TYPEHASH == keccak(
-        text="RescueRequest(address rescuer,address safe,uint256 deadline,"
+        text="RescueRequest(address rescuer,address destination,uint256 deadline,"
         "bytes32 actionsHash)"
     )
 

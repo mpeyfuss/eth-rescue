@@ -6,13 +6,43 @@ from pathlib import Path
 
 import pytest
 
+from hexbytes import HexBytes
+
 from eth_rescue import templates, ui
-from eth_rescue.report import JsonReporter
-from eth_rescue.types import ActionOutcome
+from eth_rescue.report import JsonReporter, RichReporter
+from eth_rescue.types import ActionOutcome, BundleTransaction, PreparedBundle
 
 EXAMPLE = Path(__file__).parents[1] / "examples" / "full_plan.json"
 TOKEN = "0x" + "11" * 20
-SAFE = "0x" + "22" * 20
+DESTINATION = "0x" + "22" * 20
+
+
+GAS = "0x" + "33" * 20
+
+
+def _bundle(*roles):
+    return PreparedBundle(
+        transactions=[BundleTransaction(role, HexBytes(b"\x01")) for role in roles],
+        compromised_nonce=0,
+        gas_nonce=0,
+        priority_fee=0,
+        max_fee_per_gas=564_574_168,
+        effective_fee_cap=0,
+        target_block=26_501_096,
+        required_funding=813_416_668_691_515,
+        compromised_funding=0,
+        sweep_value=0,
+    )
+
+
+def _simulated(*errors):
+    return {
+        "results": [
+            {"gasUsed": 21_000, **({"error": error} if error else {})}
+            for error in errors
+        ],
+        "totalGasUsed": 21_000 * len(errors),
+    }
 
 
 def _events(stream):
@@ -48,15 +78,15 @@ def test_json_reporter_plan_keeps_large_ints_exact():
     stream = io.StringIO()
     amount = 2**256 - 1
 
-    JsonReporter(stream).plan([templates.erc20_transfer(TOKEN, SAFE, amount)])
+    JsonReporter(stream).plan([templates.erc20_transfer(TOKEN, DESTINATION, amount)])
 
     [event] = _events(stream)
-    assert event["actions"][0]["args"] == [SAFE, str(amount)]
+    assert event["actions"][0]["args"] == [DESTINATION, str(amount)]
 
 
 def test_json_reporter_outcomes_include_detail():
     stream = io.StringIO()
-    data = [templates.erc20_transfer(TOKEN, SAFE, 5)]
+    data = [templates.erc20_transfer(TOKEN, DESTINATION, 5)]
 
     JsonReporter(stream).outcomes(data, [ActionOutcome(0, "partial", "only 2 of 5")])
 
@@ -139,3 +169,101 @@ def test_warnings_and_errors_go_to_stderr(capsys):
     assert "progress" in captured.out
     assert "careful" in captured.err and "broken" in captured.err
     assert "careful" not in captured.out and "broken" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("wei", "round_up", "shown"),
+    [
+        (0, False, "0 ETH"),
+        (10**15, False, "0.001 ETH"),
+        (821_272_627_694_656, True, "0.0008213 ETH"),
+        (821_272_627_694_656, False, "0.0008213 ETH"),
+        (81_639_484_781_964, False, "0.00008164 ETH"),
+        (12_345_678_900_000_000_000, False, "12.3457 ETH"),
+        (1, True, "0.000000000000000001 ETH"),
+    ],
+)
+def test_ether_shows_about_four_significant_digits(wei, round_up, shown):
+    assert ui.ether(wei, round_up=round_up) == shown
+
+
+def test_ether_rounding_up_never_shows_less_than_needed():
+    assert ui.ether(100_000_100_000_000, round_up=True) == "0.0001001 ETH"
+    assert ui.ether(100_000_100_000_000) == "0.0001 ETH"
+
+
+def test_rich_funding_prints_an_unchanged_status_once(capsys):
+    reporter = RichReporter()
+
+    for _ in range(3):
+        reporter.funding(GAS, 821_272_627_694_656, 0)
+    reporter.funding(GAS, 821_272_627_694_656, 10**15)
+    reporter.funding(GAS, 813_416_668_691_515, 10**15)
+
+    out = capsys.readouterr()
+    assert out.err.count("Send at least 0.0008213 ETH") == 1
+    assert out.out.count("Gas wallet funded (0.001 ETH)") == 1
+
+
+def test_rich_funding_prints_again_in_a_new_phase(capsys):
+    reporter = RichReporter()
+
+    reporter.funding(GAS, 1, 10**15)
+    reporter.phase("Phase 2: legacy fallback")
+    reporter.funding(GAS, 1, 10**15)
+
+    assert capsys.readouterr().out.count("Gas wallet funded") == 2
+
+
+def test_rich_recheck_that_still_succeeds_is_one_line(capsys):
+    reporter = RichReporter()
+
+    reporter.simulation(_simulated(None), _bundle("rescue-7702"), recheck=False)
+    first = capsys.readouterr().out
+    reporter.simulation(_simulated(None), _bundle("rescue-7702"), recheck=True)
+    again = capsys.readouterr().out
+
+    assert "rescue-7702" in first and "Simulation succeeded." in first
+    assert again.strip() == "OK Re-simulated for block 26501096: still succeeds."
+
+
+def test_rich_recheck_that_fails_shows_the_table(capsys):
+    RichReporter().simulation(
+        _simulated(None, "execution reverted"), _bundle("fund", "rescue"), recheck=True
+    )
+
+    out = capsys.readouterr().out
+    assert "execution reverted" in out and "Simulation succeeded." not in out
+
+
+def test_rich_bundle_is_one_line(capsys):
+    RichReporter().bundle(_bundle("undelegate", "fund", "rescue", "sweep"))
+
+    assert (
+        capsys.readouterr().out.split()
+        == (
+            "INFO Bundle for block 26501096: undelegate → fund → rescue → sweep. "
+            "Max fee 0.5646 gwei; the gas wallet needs 0.0008135 ETH."
+        ).split()
+    )
+
+
+def test_rich_interim_outcomes_are_left_to_the_combined_report(capsys):
+    data = [templates.erc20_transfer(TOKEN, DESTINATION, 5)]
+
+    RichReporter().outcomes(data, [ActionOutcome(0, "rescued")], interim=True)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_json_reporter_marks_rechecks_and_interim_outcomes():
+    stream = io.StringIO()
+    reporter = JsonReporter(stream)
+    data = [templates.erc20_transfer(TOKEN, DESTINATION, 5)]
+
+    reporter.simulation(_simulated(None), _bundle("rescue-7702"), recheck=True)
+    reporter.outcomes(data, [ActionOutcome(0, "rescued")], interim=True)
+
+    simulation, outcomes = _events(stream)
+    assert (simulation["recheck"], simulation["target_block"]) == (True, 26_501_096)
+    assert outcomes["interim"] is True

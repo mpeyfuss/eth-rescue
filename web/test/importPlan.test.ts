@@ -2,12 +2,12 @@ import { expect, test } from "bun:test";
 import { PlanImportError } from "../src/plan/draft";
 import { importPlan, persistablePlan } from "../src/plan/importPlan";
 
-const VICTIM = "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61";
-const SAFE = "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1";
-const TOKEN = "0x41A322b28D0fF354040e2CbC676F0320d8c8850d";
+const COMPROMISED = "0xd068c6A6db349A8Ce9C7aD3706391e53417abF61";
+const DESTINATION = "0x74A7b842FDeb244C152aa5BC8B7fbae362091EE1";
+const TOKEN = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
 const plan = (actions: unknown[], extra: Record<string, unknown> = {}) =>
-  JSON.stringify({ version: 1, network: "mainnet", victim: VICTIM, safe: SAFE, actions, ...extra });
+  JSON.stringify({ version: 1, network: "mainnet", compromised: COMPROMISED, destination: DESTINATION, actions, ...extra });
 
 test("a valid plan imports with nothing to confirm", () => {
   const result = importPlan(plan([{ type: "erc20", contract: TOKEN, amount: "5" }]));
@@ -30,7 +30,7 @@ test("conversions are listed for confirmation and raw problems are reported", ()
 });
 
 test("a plan without a network is refused", () => {
-  expect(() => importPlan(JSON.stringify({ version: 1, victim: VICTIM, safe: SAFE, actions: [] }))).toThrow(
+  expect(() => importPlan(JSON.stringify({ version: 1, compromised: COMPROMISED, destination: DESTINATION, actions: [] }))).toThrow(
     PlanImportError,
   );
 });

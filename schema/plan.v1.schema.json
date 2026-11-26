@@ -1,5 +1,52 @@
 {
   "$defs": {
+    "CryptoPunkAction": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "gas": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 8000000,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gas"
+        },
+        "type": {
+          "const": "cryptopunk",
+          "title": "Type",
+          "type": "string"
+        },
+        "token_id": {
+          "pattern": "^[0-9]{1,4}$",
+          "title": "Token Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "token_id"
+      ],
+      "title": "CryptoPunkAction",
+      "type": "object"
+    },
     "CustomAction": {
       "additionalProperties": false,
       "properties": {
@@ -293,6 +340,53 @@
       "title": "OwnershipAction",
       "type": "object"
     },
+    "SuperRareV1Action": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "gas": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 8000000,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gas"
+        },
+        "type": {
+          "const": "superrare_v1",
+          "title": "Type",
+          "type": "string"
+        },
+        "token_id": {
+          "pattern": "^[0-9]{1,78}$",
+          "title": "Token Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "token_id"
+      ],
+      "title": "SuperRareV1Action",
+      "type": "object"
+    },
     "TransientDelistErc721Action": {
       "additionalProperties": false,
       "properties": {
@@ -365,14 +459,14 @@
       "title": "Network",
       "type": "string"
     },
-    "victim": {
+    "compromised": {
       "pattern": "^0x[0-9a-fA-F]{40}$",
-      "title": "Victim",
+      "title": "Compromised",
       "type": "string"
     },
-    "safe": {
+    "destination": {
       "pattern": "^0x[0-9a-fA-F]{40}$",
-      "title": "Safe",
+      "title": "Destination",
       "type": "string"
     },
     "gas_wallet": {
@@ -395,11 +489,13 @@
       "items": {
         "discriminator": {
           "mapping": {
+            "cryptopunk": "#/$defs/CryptoPunkAction",
             "custom": "#/$defs/CustomAction",
             "erc1155": "#/$defs/Erc1155Action",
             "erc20": "#/$defs/Erc20Action",
             "erc721": "#/$defs/Erc721Action",
             "ownership": "#/$defs/OwnershipAction",
+            "superrare_v1": "#/$defs/SuperRareV1Action",
             "transient_delist_erc721": "#/$defs/TransientDelistErc721Action"
           },
           "propertyName": "type"
@@ -421,6 +517,12 @@
             "$ref": "#/$defs/TransientDelistErc721Action"
           },
           {
+            "$ref": "#/$defs/CryptoPunkAction"
+          },
+          {
+            "$ref": "#/$defs/SuperRareV1Action"
+          },
+          {
             "$ref": "#/$defs/CustomAction"
           }
         ]
@@ -433,8 +535,8 @@
   "required": [
     "version",
     "network",
-    "victim",
-    "safe",
+    "compromised",
+    "destination",
     "actions"
   ],
   "title": "Plan",

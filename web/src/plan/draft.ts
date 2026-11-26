@@ -8,7 +8,7 @@ export type ActionType = PlanAction["type"];
 
 // `ethRescue` mirrors eth_rescue/networks.py (tests/test_plan.py checks it).
 export const NETWORKS: { value: Network; label: string; ethRescue: string }[] = [
-  { value: "mainnet", label: "Ethereum mainnet", ethRescue: "0xe9Da4345F6AB43e05FF3DE7999A99Dc30710421A" },
+  { value: "mainnet", label: "Ethereum mainnet", ethRescue: "0xdC7eC38149c572a29Ac89813eda47140Ac8cD969" },
 ];
 
 export function isAvailableNetwork(value: unknown): value is Network {
@@ -33,6 +33,8 @@ export const ACTION_SPECS: Record<ActionType, ActionSpec> = {
     fields: ["auction_house", "contract", "token_id"],
     gas: "optional",
   },
+  cryptopunk: { label: "CryptoPunk", fields: ["token_id"], gas: "optional" },
+  superrare_v1: { label: "SuperRare V1 NFT", fields: ["token_id"], gas: "optional" },
   custom: { label: "Custom call", fields: ["target", "signature"], gas: "required" },
 };
 
@@ -46,17 +48,17 @@ export interface DraftAction extends Record<ActionField, string> {
   label: string;
   gas: string;
   args: string[];
-  // `network:victim` the asset was discovered for; empty when added by hand.
+  // `network:compromised` the asset was discovered for; empty when added by hand.
   discoveredFor: string;
 }
 
-export function discoveryScope(network: Network, victim: string): string {
-  return `${network}:${victim.trim().toLowerCase()}`;
+export function discoveryScope(network: Network, compromised: string): string {
+  return `${network}:${compromised.trim().toLowerCase()}`;
 }
 
 // Discovered actions that no longer match the plan's wallet or network.
 export function staleDiscoveries(draft: Draft): { path: string; message: string }[] {
-  const scope = discoveryScope(draft.network, draft.victim);
+  const scope = discoveryScope(draft.network, draft.compromised);
   return draft.actions.flatMap((action, index) =>
     action.discoveredFor && action.discoveredFor !== scope
       ? [{ path: `actions.${index}`, message: "was found for a different wallet or network; remove it" }]
@@ -66,8 +68,8 @@ export function staleDiscoveries(draft: Draft): { path: string; message: string 
 
 export interface Draft {
   network: Network;
-  victim: string;
-  safe: string;
+  compromised: string;
+  destination: string;
   gas_wallet: string;
   priority_fee_gwei: string;
   max_blocks: string;
@@ -85,8 +87,8 @@ const actionId = () => `action-${++nextId}`;
 export function emptyDraft(): Draft {
   return {
     network: "mainnet",
-    victim: "",
-    safe: "",
+    compromised: "",
+    destination: "",
     gas_wallet: "",
     priority_fee_gwei: "0",
     max_blocks: "25",
@@ -140,8 +142,8 @@ export function toPlan(draft: Draft): Record<string, unknown> {
   const plan: Record<string, unknown> = {
     version: 1,
     network: draft.network,
-    victim: toChecksum(draft.victim.trim()),
-    safe: toChecksum(draft.safe.trim()),
+    compromised: toChecksum(draft.compromised.trim()),
+    destination: toChecksum(draft.destination.trim()),
   };
   const gasWallet = draft.gas_wallet.trim();
   if (gasWallet) plan.gas_wallet = toChecksum(gasWallet);
@@ -184,8 +186,8 @@ export function fromPlan(value: unknown): Draft {
   }
   const draft = emptyDraft();
   draft.network = value.network;
-  draft.victim = text(value.victim);
-  draft.safe = text(value.safe);
+  draft.compromised = text(value.compromised);
+  draft.destination = text(value.destination);
   draft.gas_wallet = text(value.gas_wallet);
   if (isRecord(value.options)) {
     if (value.options.priority_fee_gwei !== undefined) draft.priority_fee_gwei = text(value.options.priority_fee_gwei);

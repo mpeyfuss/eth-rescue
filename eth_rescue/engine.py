@@ -63,6 +63,7 @@ class ExitCode(IntEnum):
     NOT_INCLUDED = 4
     UNRESCUED = 5
     DECLINED = 6
+    INTERRUPTED = 130
 
 
 @dataclass

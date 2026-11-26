@@ -3,6 +3,7 @@ import getpass
 import math
 import os
 import sys
+import textwrap
 import warnings
 from decimal import Decimal, InvalidOperation
 from importlib.metadata import PackageNotFoundError, version
@@ -13,6 +14,7 @@ from urllib.parse import urlsplit
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from eth_utils import to_hex
+from rich_argparse import RawDescriptionRichHelpFormatter
 
 from eth_rescue import engine, ui
 from eth_rescue.bundle import (
@@ -25,9 +27,42 @@ from eth_rescue.networks import NETWORKS, connect
 from eth_rescue.plan import Plan, PlanError, expand, load_plan, render_schema
 from eth_rescue.report import JsonReporter, Reporter, RichReporter
 
-INTERRUPTED = 130
 RPC_ENV = "ETH_RESCUE_RPC_URL"
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+GUIDE_URL = "https://github.com/mpeyfuss/eth-rescue#readme"
+HELP_WIDTH = 72
+
+KEYS_NOTE = (
+    "It asks for the compromised-wallet and gas-wallet private keys at a hidden "
+    "prompt; keys are never read from arguments, files or the environment."
+)
+INVALID_MEANING = (
+    "invalid plan, arguments, keys, network or deployment, or an RPC error "
+    "before anything was sent"
+)
+SIMULATE_EXIT_CODES = {
+    ExitCode.OK: "the bundle simulates cleanly",
+    ExitCode.INVALID: INVALID_MEANING,
+    ExitCode.SIMULATION_FAILED: "the simulation failed",
+    ExitCode.UNFUNDED: "the gas wallet was not funded in time",
+    ExitCode.INTERRUPTED: "interrupted",
+}
+RUN_EXIT_CODES = {
+    ExitCode.OK: "included; every checkable action verified",
+    ExitCode.INVALID: INVALID_MEANING,
+    ExitCode.SIMULATION_FAILED: "simulation failed; nothing was sent",
+    ExitCode.UNFUNDED: "the gas wallet was not funded in time",
+    ExitCode.NOT_INCLUDED: (
+        "not included within options.max_blocks, or it cannot tell whether a "
+        "bundle landed: check the gas wallet on a block explorer before running "
+        "again"
+    ),
+    ExitCode.UNRESCUED: "included, but an action was not rescued",
+    ExitCode.DECLINED: "declined at the confirmation",
+    ExitCode.INTERRUPTED: (
+        "interrupted; the message says whether a bundle was already submitted"
+    ),
+}
 
 
 class CliError(Exception):
@@ -38,29 +73,41 @@ class ArgumentParser(argparse.ArgumentParser):
     """Usage errors exit 1 (invalid input); argparse's own 2 means
     "simulation failed" here."""
 
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("formatter_class", RawDescriptionRichHelpFormatter)
+        super().__init__(*args, **kwargs)
+
     def error(self, message: str) -> NoReturn:
         self.print_usage(sys.stderr)
         self.exit(ExitCode.INVALID, f"{self.prog}: error: {message}\n")
 
 
+def _reporter(args: argparse.Namespace) -> Reporter:
+    return JsonReporter() if args.json else RichReporter()
+
+
 def _validate(args: argparse.Namespace) -> int:
+    reporter = _reporter(args)
     try:
         plan = load_plan(args.plan)
     except PlanError as e:
-        ui.error(f"Invalid plan {args.plan}:\n{e}")
+        reporter.message("error", f"Invalid plan {args.plan}:\n{e}")
         return ExitCode.INVALID
-    ui.info(f"Network:    {plan.network}")
-    ui.info(f"Victim:     {plan.victim}")
-    ui.info(f"Safe:       {plan.safe}")
-    ui.info(f"Gas wallet: {plan.gas_wallet or '(not set)'}")
-    ui.info(f"Extra priority fee: {plan.options.priority_fee_gwei} gwei")
+    reporter.message("info", f"Network:    {plan.network}")
+    reporter.message("info", f"Victim:     {plan.victim}")
+    reporter.message("info", f"Safe:       {plan.safe}")
+    reporter.message("info", f"Gas wallet: {plan.gas_wallet or '(not set)'}")
+    reporter.message(
+        "info", f"Extra priority fee: {plan.options.priority_fee_gwei} gwei"
+    )
     if Decimal(plan.options.priority_fee_gwei) > HIGH_PRIORITY_FEE_GWEI:
-        ui.warning(
+        reporter.message(
+            "warning",
             "options.priority_fee_gwei is unusually high and is paid on every gas "
-            "unit; check it for a typo."
+            "unit; check it for a typo.",
         )
-    ui.render_rescue_plan(expand(plan))
-    ui.success("Plan is valid.")
+    reporter.plan(expand(plan))
+    reporter.message("success", "Plan is valid.")
     return ExitCode.OK
 
 
@@ -238,7 +285,7 @@ def _after_stop(reporter: Reporter, ctx: RescueContext) -> None:
 
 
 def _rescue(args: argparse.Namespace) -> int:
-    reporter: Reporter = JsonReporter() if args.json else RichReporter()
+    reporter = _reporter(args)
     try:
         plan, ctx = _context(args, reporter)
     except (PlanError, CliError, ConnectionError) as e:
@@ -261,11 +308,17 @@ def _rescue(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         reporter.message("warning", "Interrupted.")
         _after_stop(reporter, ctx)
-        return INTERRUPTED
+        return ExitCode.INTERRUPTED
     except Exception as e:
         reporter.message("error", f"Stopped by an unexpected error: {e}")
         _after_stop(reporter, ctx)
         return ExitCode.NOT_INCLUDED if ctx.progress.sent else ExitCode.INVALID
+
+
+def _add_json_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--json", action="store_true", help="print NDJSON events instead of text"
+    )
 
 
 def _add_rescue_arguments(parser: argparse.ArgumentParser) -> None:
@@ -279,15 +332,13 @@ def _add_rescue_arguments(parser: argparse.ArgumentParser) -> None:
             f"{RPC_ENV}, which keeps an API key out of your shell history"
         ),
     )
-    parser.add_argument(
-        "--json", action="store_true", help="print NDJSON events instead of text"
-    )
+    _add_json_argument(parser)
     parser.add_argument(
         "--funding-timeout",
         type=funding_timeout,
         default=engine.DEFAULT_FUNDING_TIMEOUT,
         metavar="SECONDS",
-        help="how long to wait for the gas wallet to be funded (default: 1800)",
+        help="how long to wait for the gas wallet to be funded (default: %(default)s)",
     )
     parser.add_argument(
         "--gas-multiplier",
@@ -295,9 +346,9 @@ def _add_rescue_arguments(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_GAS_MULTIPLIER,
         metavar="X",
         help=(
-            "multiply each action's live gas estimate by X "
-            f"(default: {DEFAULT_GAS_MULTIPLIER}; {MIN_GAS_MULTIPLIER}-"
-            f"{MAX_GAS_MULTIPLIER}). The plan's gas is always the minimum"
+            "multiply each action's live gas estimate by X (default: "
+            f"%(default)s; {MIN_GAS_MULTIPLIER}-{MAX_GAS_MULTIPLIER}). The plan's "
+            "gas is always the minimum"
         ),
     )
     parser.set_defaults(handler=_rescue)
@@ -310,35 +361,113 @@ def _version() -> str:
         return "unknown"
 
 
+def _paragraphs(*texts: str) -> str:
+    return "\n\n".join(textwrap.fill(text, HELP_WIDTH) for text in texts)
+
+
+def _exit_codes(meanings: dict[ExitCode, str]) -> str:
+    rows = (
+        textwrap.fill(
+            meaning,
+            HELP_WIDTH,
+            initial_indent=f"  {code.value:>3}  ",
+            subsequent_indent=" " * 7,
+        )
+        for code, meaning in meanings.items()
+    )
+    return "Exit codes:\n" + "\n".join(rows)
+
+
+def _root_epilog() -> str:
+    flow = (
+        "Typical flow:\n"
+        "  eth-rescue gas-wallet new       a fresh wallet to pay fees (optional)\n"
+        "  eth-rescue validate plan.json   check the plan offline, no keys\n"
+        "  eth-rescue simulate plan.json   dry run on the relay, never sends\n"
+        "  eth-rescue run plan.json        the rescue"
+    )
+    return f"{flow}\n\n" + _paragraphs(
+        "Run `eth-rescue COMMAND --help` for details. `eth-rescue schema` and the "
+        "examples/ folder describe the plan format.",
+        f"Guide: {GUIDE_URL}",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = ArgumentParser(
         prog="eth-rescue",
-        description="Rescue assets from a compromised Ethereum account.",
+        description=_paragraphs(
+            "Rescue assets and contract control from a compromised Ethereum "
+            "account through private Flashbots bundles, following a JSON plan."
+        ),
+        epilog=_root_epilog(),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(
+        dest="command", required=True, title="commands", metavar="COMMAND"
+    )
 
     validate = commands.add_parser(
-        "validate", help="check a plan file without touching the network"
+        "validate",
+        help="check a plan file without touching the network",
+        description=_paragraphs(
+            "Check a plan file offline: the schema, address checksums, distinct "
+            "wallets, the uint256 range and every call's calldata. Needs no keys "
+            "and no network, and prints the actions the plan will run.",
+            "Exits 0 if the plan is valid and 1 if it is not.",
+        ),
     )
     validate.add_argument("plan", help="path to plan.json")
+    _add_json_argument(validate)
     validate.set_defaults(handler=_validate)
 
     simulate = commands.add_parser(
-        "simulate", help="build and simulate the rescue bundle without sending it"
+        "simulate",
+        help="build and simulate the rescue bundle without sending it",
+        description=_paragraphs(
+            "Build the phase-1 rescue bundle and simulate it on the Flashbots "
+            "relay without sending it. Like `run`, it waits for the gas wallet to "
+            "hold enough ETH first. The legacy fallback is not simulated.",
+            KEYS_NOTE,
+        ),
+        epilog=_exit_codes(SIMULATE_EXIT_CODES),
     )
     _add_rescue_arguments(simulate)
 
-    run = commands.add_parser("run", help="simulate, confirm, and submit the rescue")
+    run = commands.add_parser(
+        "run",
+        help="simulate, confirm, and submit the rescue",
+        description=_paragraphs(
+            "Simulate the rescue bundle, ask once before sending, then submit it "
+            "through Flashbots until it is included or options.max_blocks have "
+            "passed. When options.legacy_fallback is on, actions that failed or "
+            "never ran are then retried as direct transactions without asking "
+            "again.",
+            KEYS_NOTE,
+        ),
+        epilog=_exit_codes(RUN_EXIT_CODES),
+    )
     _add_rescue_arguments(run)
     run.add_argument(
         "--yes", action="store_true", help="skip the send confirmation prompt"
     )
 
-    gas_wallet = commands.add_parser("gas-wallet", help="gas wallet utilities")
-    gas_wallet_commands = gas_wallet.add_subparsers(dest="gas_command", required=True)
+    gas_wallet = commands.add_parser(
+        "gas-wallet",
+        help="gas wallet utilities",
+        description="Gas wallet utilities.",
+    )
+    gas_wallet_commands = gas_wallet.add_subparsers(
+        dest="gas_command", required=True, title="commands", metavar="COMMAND"
+    )
     new_gas_wallet = gas_wallet_commands.add_parser(
-        "new", help="generate a fresh gas wallet"
+        "new",
+        help="generate a fresh gas wallet",
+        description=_paragraphs(
+            "Generate a fresh wallet to pay the rescue's fees and print its "
+            "address and private key. Put the address in your plan as gas_wallet, "
+            "and keep the key to recover any unused balance afterwards."
+        ),
     )
     new_gas_wallet.add_argument(
         "--out",
@@ -349,7 +478,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     new_gas_wallet.set_defaults(handler=_new_gas_wallet)
 
-    schema = commands.add_parser("schema", help="print the plan JSON Schema")
+    schema = commands.add_parser(
+        "schema",
+        help="print the plan JSON Schema",
+        description="Print the plan JSON Schema to stdout.",
+    )
     schema.set_defaults(handler=_schema)
     return parser
 
@@ -365,8 +498,4 @@ def main(argv: list[str] | None = None) -> int:
             JsonReporter().message("warning", message)
         else:
             ui.warning(message)
-        return INTERRUPTED
-
-
-def run() -> None:
-    sys.exit(main())
+        return ExitCode.INTERRUPTED

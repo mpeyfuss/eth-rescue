@@ -352,7 +352,6 @@ def check_bundle_limits(
 
 
 def _required_funding_7702(rescue_gas_limits: list[int], max_fee_per_gas: int) -> int:
-    """Total ETH the gas wallet must hold for the rescue calls."""
     total_gas = sum(rescue_gas_limits)
     return int(total_gas * max_fee_per_gas * FUNDING_BUFFER)
 

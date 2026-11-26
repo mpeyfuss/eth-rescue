@@ -35,7 +35,6 @@ def erc20_transfer(contract: str, to: str, amount: int) -> RescueData:
 def erc721_transfer(
     contract: str, from_victim: str, to: str, token_id: int
 ) -> RescueData:
-    """Transfer an ERC721 NFT from the victim wallet to a safe wallet."""
     return {
         "address": contract,
         "function_signature": "transferFrom(address,address,uint256)",
@@ -74,7 +73,6 @@ def transient_auction_house_erc721_rescue(
 def erc1155_transfer(
     contract: str, from_victim: str, to: str, token_id: int, amount: int
 ) -> RescueData:
-    """Transfer ERC1155 tokens from the victim wallet to a safe wallet."""
     return {
         "address": contract,
         "function_signature": "safeTransferFrom(address,address,uint256,uint256,bytes)",
@@ -92,7 +90,6 @@ def erc1155_transfer(
 
 
 def transfer_ownership(contract: str, to: str) -> RescueData:
-    """Transfer ownership of a contract (Ownable) to a safe wallet."""
     return {
         "address": contract,
         "function_signature": "transferOwnership(address)",
@@ -106,8 +103,7 @@ def transfer_ownership(contract: str, to: str) -> RescueData:
 def custom(
     contract: str, function_signature: str, args: list, gas_estimate: int = GAS_GENERIC
 ) -> RescueData:
-    """Generic action: any function signature + args (power-user escape hatch).
-    It has no check: its effect is only known from its call result."""
+    """No check: its effect is only known from its call result."""
     return {
         "address": contract,
         "function_signature": function_signature,

@@ -53,6 +53,27 @@ def test_validate_rejects_invalid_plan(tmp_path, capsys):
     assert "Invalid plan" in capsys.readouterr().err
 
 
+def test_validate_json_prints_ndjson_events(capsys):
+    assert main(["validate", "--json", str(EXAMPLE)]) == ExitCode.OK
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert "plan" in {event["event"] for event in events}
+    assert events[-1] == {
+        "event": "message",
+        "level": "success",
+        "text": "Plan is valid.",
+    }
+
+
+def test_validate_json_reports_invalid_plan_as_an_event(tmp_path, capsys):
+    path = tmp_path / "plan.json"
+    path.write_text("[]")
+
+    assert main(["validate", "--json", str(path)]) == ExitCode.INVALID
+    [event] = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert event["level"] == "error"
+    assert event["text"].startswith("Invalid plan")
+
+
 def test_schema_prints_json_schema(capsys):
     assert main(["schema"]) == ExitCode.OK
     assert json.loads(capsys.readouterr().out) == plan_json_schema()
@@ -199,7 +220,7 @@ def test_interrupt_at_key_prompt_says_nothing_was_sent(monkeypatch, capsys):
     monkeypatch.setattr(cli, "connect", lambda *a, **k: object())
     monkeypatch.setattr(cli, "read_accounts", interrupt)
 
-    assert main(["run", str(EXAMPLE), "--json"]) == cli.INTERRUPTED
+    assert main(["run", str(EXAMPLE), "--json"]) == ExitCode.INTERRUPTED
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert events[-1]["text"] == "Interrupted. Nothing was sent."
 
@@ -222,6 +243,16 @@ def test_usage_errors_exit_invalid_not_simulation_failed(capsys):
 
     assert exit_info.value.code == ExitCode.INVALID
     assert "unrecognized arguments: --yes" in capsys.readouterr().err
+
+
+def test_run_help_lists_every_exit_code(capsys):
+    with pytest.raises(SystemExit):
+        main(["run", "--help"])
+
+    help_text = capsys.readouterr().out
+    assert set(cli.RUN_EXIT_CODES) == set(ExitCode)
+    for code in ExitCode:
+        assert f"  {code.value:>3}  " in help_text
 
 
 def test_version_flag(capsys):
@@ -415,7 +446,7 @@ def test_unexpected_error_mid_rescue_is_reported_cleanly(
 def test_interrupt_after_submission_names_the_gas_wallet(dispatch, monkeypatch, capsys):
     monkeypatch.setattr(cli.engine, "run", _crash(True, KeyboardInterrupt()))
 
-    assert main(["run", str(EXAMPLE), "--json"]) == cli.INTERRUPTED
+    assert main(["run", str(EXAMPLE), "--json"]) == ExitCode.INTERRUPTED
 
     texts = [json.loads(line)["text"] for line in capsys.readouterr().out.splitlines()]
     assert texts[-2] == "Interrupted."

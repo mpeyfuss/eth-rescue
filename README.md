@@ -30,7 +30,7 @@ uvx eth-rescue@1.0.0 run plan.json           # the rescue
 uvx eth-rescue@1.0.0 schema                  # print the plan JSON Schema
 ```
 
-`simulate` and `run` take `--json` (NDJSON events on stdout), `--rpc URL`, `--gas-multiplier X` (1–10, default 1.5) and `--funding-timeout SECONDS` (default 1800). `run` also takes `--yes` (skip the one confirmation). To use your own RPC, prefer setting `ETH_RESCUE_RPC_URL` over `--rpc`, so an API key in the URL stays out of your shell history; printed errors never show URL paths. Warnings and errors go to stderr.
+Each command's `--help` lists its flags and exit codes. `--json` prints NDJSON events on stdout; warnings and errors go to stderr. To use your own RPC, set `ETH_RESCUE_RPC_URL` rather than passing `--rpc`, so an API key in the URL stays out of your shell history (printed errors never show URL paths).
 
 ### Accounts
 
@@ -47,7 +47,7 @@ uvx eth-rescue@1.0.0 schema                  # print the plan JSON Schema
 5. Simulates the exact signed bundle on the relay, then asks once before sending.
 6. Submits for five blocks at a time, rebuilding with fresh nonces and fees between windows, until included or `options.max_blocks` blocks have been submitted. Before each rebuild it checks whether an earlier bundle landed. If the gas wallet's nonce moved and no bundle is visible, it stops instead of resubmitting.
 7. Checks each action at the inclusion block: the safe's ERC-20/ERC-1155 balance went up by the amount, or the safe now owns the NFT or the contract.
-8. **Phase 2, legacy fallback** (`options.legacy_fallback`, default on). Actions that failed or never ran are retried as direct transactions from the compromised wallet: clear the delegation, fund the wallet, send each action, sweep the ETH. It runs without asking again. An action that reverts in simulation, at the start or in any later window, is left out, so it cannot block the rest. Unverified and partial actions are never retried. The wallet is funded for each action's full gas limit, and the sweep is signed before the gas used is known, so unused gas stays in the compromised wallet; the CLI prints the most that can be left behind.
+8. **Phase 2, legacy fallback** (`options.legacy_fallback`, default on). Actions that failed or never ran are retried as direct transactions from the compromised wallet: clear the delegation, fund the wallet, send each action, sweep the ETH. It runs without asking again. An action that reverts in simulation, in any window, is left out so it cannot block the rest. Unverified and partial actions are never retried. The sweep is signed before the gas used is known, so unused gas money stays in the compromised wallet; the CLI prints the most that can be left behind.
 9. Prints the outcome table, the ETH left in the compromised wallet, and its delegation.
 
 If the compromised wallet's nonce changes before the phase-1 transaction in the same block, its EIP-7702 authorization is skipped: the transaction succeeds but rescues nothing. Step 7 reports those actions failed, and phase 2 (or a rerun) retries them.

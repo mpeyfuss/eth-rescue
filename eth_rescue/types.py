@@ -46,8 +46,8 @@ class Network(TypedDict):
 class PreparedAction(TypedDict):
     """A rescue action with encoded calldata and a fixed gas limit."""
 
-    to: str  # ethereum address
-    data: str  # 0x prepended hex string
+    to: str
+    data: str
     gas: int
 
 
